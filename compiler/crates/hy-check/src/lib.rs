@@ -470,29 +470,80 @@ fn detect_prelude_use(file: &File) -> PreludeUse {
 /// guard is conditional on the prelude actually being injected: a `fn set`
 /// in a program with no set surface builds and stays accepted.
 fn check_prelude_reserved(ck: &mut Checker<'_>, name: &str, span: Span, use_: PreludeUse) {
-    let active = match name {
-        "option" | "some" => use_.option,
-        "set" => use_.set,
-        "hy_pop" => use_.pop,
-        _ => false,
-    };
-    if !active {
+    // Issue #777: the prelude's own package-level declarations.
+    if matches!(name, "option" | "some" | "set" | "hy_pop") {
+        let active = match name {
+            "option" | "some" => use_.option,
+            "set" => use_.set,
+            "hy_pop" => use_.pop,
+            _ => false,
+        };
+        if !active {
+            return;
+        }
+        ck.diags.push(
+            Diagnostic::error(
+                "HYB-E1002",
+                ck.path.clone(),
+                span,
+                format!(
+                    "`{name}` is reserved by the Hybrid prelude — the emitted Go would redeclare it (`{name} redeclared in this block`) (HYB-E1002)"
+                ),
+            )
+            .with_notes(vec![
+                format!(
+                    "why: when a program triggers the option/set/slice surface, the emitter injects `option`, `some`, `set` and `hy_pop` into the generated Go; a package-level `{name}` lands in the same Go package block and collides (issue #777)"
+                ),
+                "fix: rename the declaration — prelude names are reserved stdlib surface".to_string(),
+            ]),
+        );
         return;
     }
+
+    // Issue #1035: Go builtins called by the prelude body. A package-level
+    // declaration shadows the builtin for the whole Go package, including the
+    // auto-generated prelude. `panic` silently changes `unwrap(none)` from
+    // HY-PANIC/unwrap-none to the user's function; `len`/`make`/`delete` make
+    // the prelude (and other lowering) unbuildable.
+    let mut preludes: Vec<&str> = Vec::new();
+    match name {
+        "panic" if use_.option => preludes.push("option"),
+        "make" | "delete" if use_.set => preludes.push("set"),
+        "len" => {
+            if use_.set {
+                preludes.push("set");
+            }
+            if use_.pop {
+                preludes.push("slice");
+            }
+        }
+        _ => {}
+    }
+    if preludes.is_empty() {
+        return;
+    }
+    let where_ = preludes.join("/");
+    let effect = if name == "panic" {
+        "the prelude's `panic(\"HY-PANIC/unwrap-none\")` call reaches the user declaration, so `unwrap()` on `none` silently returns the zero value instead of aborting (issue #1035)"
+    } else {
+        "the prelude's call reaches the user declaration, so the generated Go fails to build (issue #1035)"
+    };
     ck.diags.push(
         Diagnostic::error(
             "HYB-E1002",
             ck.path.clone(),
             span,
             format!(
-                "`{name}` is reserved by the Hybrid prelude — the emitted Go would redeclare it (`{name} redeclared in this block`) (HYB-E1002)"
+                "`{name}` is a Go builtin called by the emitted {where_} prelude — a package-level declaration shadows it inside the generated prelude (HYB-E1002)"
             ),
         )
         .with_notes(vec![
             format!(
-                "why: when a program triggers the option/set/slice surface, the emitter injects `option`, `some`, `set` and `hy_pop` into the generated Go; a package-level `{name}` lands in the same Go package block and collides (issue #777)"
+                "why: this program triggers the {where_} surface, so the emitter injects a prelude whose body calls the Go builtin `{name}`. Go resolves package-level declarations before predeclared identifiers, and a builtin cannot be package-qualified, so {effect}"
             ),
-            "fix: rename the declaration — prelude names are reserved stdlib surface".to_string(),
+            format!(
+                "fix: rename the package-level `{name}` — the prelude cannot recover the builtin once it is shadowed"
+            ),
         ]),
     );
 }

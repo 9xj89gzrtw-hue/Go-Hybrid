@@ -230,3 +230,166 @@ fn main() {
 ",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1035 — Go builtins called by the prelude body. A package-level
+// declaration shadows the builtin for the whole Go package, including the
+// auto-generated prelude. `panic` is the silent one: unwrap(none) returns the
+// zero value instead of panicking with HY-PANIC/unwrap-none.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn user_fn_panic_with_option_surface_is_rejected() {
+    assert_code(
+        "\
+fn panic(msg string) {
+    fmt.println(msg)
+}
+
+fn main() {
+    var o option[int]
+    fmt.println(\"{o.is_some()}\")
+}
+",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn user_fn_len_with_set_surface_is_rejected() {
+    assert_code(
+        "\
+fn len(xs []int) int {
+    return 0
+}
+
+fn main() {
+    s := set[int]{}
+    s.insert(1)
+    fmt.println(\"{s.contains(1)}\")
+}
+",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn user_fn_make_with_set_surface_is_rejected() {
+    assert_code(
+        "\
+fn make(x int) int {
+    return x
+}
+
+fn main() {
+    s := set[int]{}
+    s.insert(1)
+    fmt.println(\"{s.contains(1)}\")
+}
+",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn user_fn_delete_with_set_surface_is_rejected() {
+    assert_code(
+        "\
+fn delete(x int) int {
+    return x
+}
+
+fn main() {
+    s := set[int]{}
+    s.insert(1)
+    fmt.println(\"{s.contains(1)}\")
+}
+",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn user_fn_len_with_slice_prelude_is_rejected() {
+    assert_code(
+        "\
+fn len(xs []int) int {
+    return 0
+}
+
+fn main() {
+    xs := []int{1, 2}
+    n := xs.pop()
+    fmt.println(\"{n}\")
+}
+",
+        "HYB-E1002",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// No over-rejection: the builtin is only reserved while its prelude is active,
+// and only at package level.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fn_panic_without_the_option_surface_is_allowed() {
+    assert_ok(
+        "\
+fn panic(msg string) {
+    fmt.println(msg)
+}
+
+fn main() {
+    panic(\"hello\")
+}
+",
+    );
+}
+
+#[test]
+fn fn_make_with_only_the_option_surface_is_allowed() {
+    // The option prelude calls `panic`, not `make`.
+    assert_ok(
+        "\
+fn make(x int) int {
+    return x
+}
+
+fn main() {
+    var o option[int]
+    n := make(1)
+    fmt.println(\"{n}\")
+    fmt.println(\"{o.is_some()}\")
+}
+",
+    );
+}
+
+#[test]
+fn fn_len_without_a_set_or_slice_surface_is_allowed() {
+    assert_ok(
+        "\
+fn len(x int) int {
+    return x
+}
+
+fn main() {
+    n := len(1)
+    fmt.println(\"{n}\")
+}
+",
+    );
+}
+
+#[test]
+fn local_named_panic_is_allowed() {
+    assert_ok(
+        "\
+fn main() {
+    panic := 1
+    fmt.println(\"{panic}\")
+}
+",
+    );
+}
