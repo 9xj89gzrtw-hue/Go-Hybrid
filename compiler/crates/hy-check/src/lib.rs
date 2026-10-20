@@ -64,9 +64,9 @@ mod builtins;
 mod range_iter;
 mod recv;
 
-use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
+use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity, Span};
 
-use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt};
+use hy_syntax::{Block, Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt, TypeExpr};
 use model::{Binding, Checker, FnState, MANAGED_CATEGORIES, TypeShape};
 
 /// The result of checking one file.
@@ -167,8 +167,339 @@ pub fn check_file(file: &File) -> CheckResult {
 // File-level tables
 // ---------------------------------------------------------------------------
 
+/// Which emitter preludes a file triggers. The emitter decides by scanning
+/// the generated Go body for `option[`/`some(`, `set[`/`.insert(`/…, and
+/// `hy_pop(` (hy-emit `assemble`); this mirrors those triggers on the AST so
+/// the checker can reject a colliding declaration only when the prelude is
+/// actually injected — a user `fn set` with no set surface builds fine.
+#[derive(Debug, Default, Clone, Copy)]
+struct PreludeUse {
+    option: bool,
+    set: bool,
+    pop: bool,
+}
+
+fn callee_name(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Ident { name, .. } => Some(name.as_str()),
+        Expr::Field { name, .. } => Some(name.as_str()),
+        Expr::Paren { inner, .. } => callee_name(inner),
+        _ => None,
+    }
+}
+
+fn scan_prelude_type(ty: &TypeExpr, u: &mut PreludeUse) {
+    match ty {
+        TypeExpr::Option { elem, .. } => {
+            u.option = true;
+            scan_prelude_type(elem, u);
+        }
+        TypeExpr::Named { name, .. } => {
+            // TypeExpr::Option covers `option[T]`; `set[T]` is folded into
+            // the name string (the parser has no type-argument node).
+            if name.starts_with("set[") {
+                u.set = true;
+            }
+        }
+        TypeExpr::Pointer { to, .. } | TypeExpr::Slice { elem: to, .. } => {
+            scan_prelude_type(to, u)
+        }
+        TypeExpr::Array { elem, .. } | TypeExpr::Chan { elem, .. } => scan_prelude_type(elem, u),
+        TypeExpr::Map { key, value, .. } => {
+            scan_prelude_type(key, u);
+            scan_prelude_type(value, u);
+        }
+        TypeExpr::Fn {
+            params, results, ..
+        } => {
+            for p in params {
+                scan_prelude_type(&p.ty, u);
+            }
+            for r in results {
+                scan_prelude_type(r, u);
+            }
+        }
+    }
+}
+
+fn scan_prelude_expr(e: &Expr, u: &mut PreludeUse) {
+    match e {
+        Expr::Ident { .. } | Expr::Lit { .. } => {}
+        Expr::Interp { parts, .. } => {
+            for p in parts {
+                if let hy_syntax::InterpPart::Expr(x) = p {
+                    scan_prelude_expr(x, u);
+                }
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            scan_prelude_expr(lhs, u);
+            scan_prelude_expr(rhs, u);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Move { operand, .. }
+        | Expr::Try { operand, .. } => scan_prelude_expr(operand, u),
+        Expr::Receive { chan, .. } => scan_prelude_expr(chan, u),
+        Expr::Index { base, index, .. } => {
+            scan_prelude_expr(base, u);
+            scan_prelude_expr(index, u);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            scan_prelude_expr(base, u);
+            if let Some(x) = lo {
+                scan_prelude_expr(x, u);
+            }
+            if let Some(x) = hi {
+                scan_prelude_expr(x, u);
+            }
+        }
+        Expr::Field { base, .. } => scan_prelude_expr(base, u),
+        Expr::Call { callee, args, .. } => {
+            if let Some(name) = callee_name(callee) {
+                match name {
+                    // Any call text ending in `some(` / `hy_pop(` makes the
+                    // emitter inject that prelude, even when the callee is a
+                    // user function or a method.
+                    "some" => u.option = true,
+                    "hy_pop" | "pop" => u.pop = true,
+                    "insert" | "contains" | "remove" => u.set = true,
+                    _ => {}
+                }
+            }
+            scan_prelude_expr(callee, u);
+            for a in args {
+                scan_prelude_expr(&a.value, u);
+            }
+        }
+        Expr::StructLit { ty, fields, .. } => {
+            if let Some(t) = ty {
+                scan_prelude_type(t, u);
+            }
+            for f in fields {
+                scan_prelude_expr(&f.value, u);
+            }
+        }
+        Expr::SliceLit { elem, items, .. } => {
+            if let Some(t) = elem {
+                scan_prelude_type(t, u);
+            }
+            for i in items {
+                scan_prelude_expr(i, u);
+            }
+        }
+        Expr::MapLit {
+            key,
+            value,
+            entries,
+            ..
+        } => {
+            scan_prelude_type(key, u);
+            scan_prelude_type(value, u);
+            for (k, v) in entries {
+                scan_prelude_expr(k, u);
+                scan_prelude_expr(v, u);
+            }
+        }
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } => {
+            for p in params {
+                scan_prelude_type(&p.ty, u);
+            }
+            for r in results {
+                scan_prelude_type(&r.ty, u);
+            }
+            scan_prelude_block(body, u);
+        }
+        Expr::Paren { inner, .. } => scan_prelude_expr(inner, u),
+    }
+}
+
+fn scan_prelude_block(block: &Block, u: &mut PreludeUse) {
+    for s in &block.stmts {
+        scan_prelude_stmt(s, u);
+    }
+}
+
+fn scan_prelude_stmt(s: &Stmt, u: &mut PreludeUse) {
+    match s {
+        Stmt::Local(l) => {
+            if let Some(t) = &l.ty {
+                scan_prelude_type(t, u);
+            }
+            for v in &l.values {
+                scan_prelude_expr(v, u);
+            }
+        }
+        Stmt::Assign {
+            targets, values, ..
+        } => {
+            for t in targets {
+                if let hy_syntax::PlaceKind::Index { index, .. } = &t.kind {
+                    scan_prelude_expr(index, u);
+                }
+            }
+            for v in values {
+                scan_prelude_expr(v, u);
+            }
+        }
+        Stmt::Expr { expr, .. } => scan_prelude_expr(expr, u),
+        Stmt::Send { chan, value, .. } => {
+            scan_prelude_expr(chan, u);
+            scan_prelude_expr(value, u);
+        }
+        Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            if let Some(i) = init {
+                scan_prelude_stmt(i, u);
+            }
+            scan_prelude_expr(cond, u);
+            scan_prelude_block(then, u);
+            if let Some(o) = otherwise {
+                scan_prelude_stmt(o, u);
+            }
+        }
+        Stmt::For { kind, body, .. } => {
+            match kind {
+                ForKind::While { cond } => scan_prelude_expr(cond, u),
+                ForKind::Range { lo, hi, .. } => {
+                    scan_prelude_expr(lo, u);
+                    scan_prelude_expr(hi, u);
+                }
+                ForKind::Iterate { expr, .. } => scan_prelude_expr(expr, u),
+                ForKind::Infinite => {}
+            }
+            scan_prelude_block(body, u);
+        }
+        Stmt::Return { values, .. } => {
+            for v in values {
+                scan_prelude_expr(v, u);
+            }
+        }
+        Stmt::Task { callee, args, .. } => {
+            scan_prelude_expr(callee, u);
+            for a in args {
+                scan_prelude_expr(&a.value, u);
+            }
+        }
+        Stmt::Managed { body, .. } => scan_prelude_block(body, u),
+        Stmt::Match { subject, arms, .. } => {
+            scan_prelude_expr(subject, u);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    scan_prelude_expr(g, u);
+                }
+                scan_prelude_block(&arm.body, u);
+            }
+        }
+        Stmt::Defer { call, .. } => scan_prelude_expr(call, u),
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Block { block, .. } => scan_prelude_block(block, u),
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                match &arm.kind {
+                    SelectArmKind::Send { chan, value, .. } => {
+                        scan_prelude_expr(chan, u);
+                        scan_prelude_expr(value, u);
+                    }
+                    SelectArmKind::Recv { chan, .. } => scan_prelude_expr(chan, u),
+                    SelectArmKind::Default => {}
+                }
+                scan_prelude_block(&arm.body, u);
+            }
+        }
+    }
+}
+
+fn detect_prelude_use(file: &File) -> PreludeUse {
+    let mut u = PreludeUse::default();
+    for d in &file.decls {
+        match d {
+            Decl::Const(c) => {
+                if let Some(t) = &c.ty {
+                    scan_prelude_type(t, &mut u);
+                }
+                scan_prelude_expr(&c.value, &mut u);
+            }
+            Decl::Struct(s) => {
+                for f in &s.fields {
+                    scan_prelude_type(&f.ty, &mut u);
+                }
+            }
+            Decl::Fn(f) => {
+                if let Some(r) = &f.receiver {
+                    scan_prelude_type(&r.ty, &mut u);
+                }
+                for p in &f.params {
+                    scan_prelude_type(&p.ty, &mut u);
+                }
+                for r in &f.results {
+                    scan_prelude_type(&r.ty, &mut u);
+                }
+                if let Some(body) = &f.body {
+                    scan_prelude_block(body, &mut u);
+                }
+            }
+            Decl::Enum(e) => {
+                for v in &e.variants {
+                    if let Some(t) = &v.payload {
+                        scan_prelude_type(t, &mut u);
+                    }
+                }
+            }
+            Decl::TypeAlias(t) => scan_prelude_type(&t.ty, &mut u),
+            Decl::Import { .. } => {}
+        }
+    }
+    u
+}
+
+/// Issue #777: a package-level user declaration whose name the emitted
+/// prelude also declares makes the generated Go unbuildable (`X redeclared in
+/// this block`). Reject it at check time so the failure carries a Hybrid span
+/// and code instead of a raw `go build` error (GUARANTEES.md Row 13). The
+/// guard is conditional on the prelude actually being injected: a `fn set`
+/// in a program with no set surface builds and stays accepted.
+fn check_prelude_reserved(ck: &mut Checker<'_>, name: &str, span: Span, use_: PreludeUse) {
+    let active = match name {
+        "option" | "some" => use_.option,
+        "set" => use_.set,
+        "hy_pop" => use_.pop,
+        _ => false,
+    };
+    if !active {
+        return;
+    }
+    ck.diags.push(
+        Diagnostic::error(
+            "HYB-E1002",
+            ck.path.clone(),
+            span,
+            format!(
+                "`{name}` is reserved by the Hybrid prelude — the emitted Go would redeclare it (`{name} redeclared in this block`) (HYB-E1002)"
+            ),
+        )
+        .with_notes(vec![
+            format!(
+                "why: when a program triggers the option/set/slice surface, the emitter injects `option`, `some`, `set` and `hy_pop` into the generated Go; a package-level `{name}` lands in the same Go package block and collides (issue #777)"
+            ),
+            "fix: rename the declaration — prelude names are reserved stdlib surface".to_string(),
+        ]),
+    );
+}
+
 fn build_tables(ck: &mut Checker<'_>) {
     let file: &File = ck.file;
+    let prelude = detect_prelude_use(file);
     for d in &file.decls {
         match d {
             Decl::Import { path, .. } => {
@@ -177,12 +508,14 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.packages.insert(root.to_string());
             }
             Decl::Const(c) => {
+                check_prelude_reserved(ck, &c.name, c.span, prelude);
                 ck.declare_pkg_name(&c.name, "const", c.span);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
                 ck.const_values.insert(c.name.clone(), &c.value);
             }
             Decl::Struct(s) => {
+                check_prelude_reserved(ck, &s.name, s.span, prelude);
                 // Issue #201-C: package-scope names are unique across
                 // fns / consts / structs (Go's single package block).
                 ck.declare_pkg_name(&s.name, "struct", s.span);
@@ -259,11 +592,13 @@ fn build_tables(ck: &mut Checker<'_>) {
                     // Issue #201-C/D: method-set dup + receiver validity.
                     ck.declare_method(f);
                 } else {
+                    check_prelude_reserved(ck, &f.name, f.span, prelude);
                     ck.declare_pkg_name(&f.name, "fn", f.span);
                     ck.fns.insert(f.name.clone(), f);
                 }
             }
             Decl::Enum(e) => {
+                check_prelude_reserved(ck, &e.name, e.span, prelude);
                 ck.enum_has_zero_value.insert(
                     e.name.clone(),
                     e.variants.first().is_some_and(|v| v.payload.is_none()),
@@ -275,6 +610,7 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.declare_pkg_name(&e.name, "enum", e.span);
             }
             Decl::TypeAlias(ta) => {
+                check_prelude_reserved(ck, &ta.name, ta.span, prelude);
                 ck.type_aliases.insert(ta.name.clone(), ta.ty.clone());
                 ck.declare_pkg_name(&ta.name, "type", ta.span);
             }
