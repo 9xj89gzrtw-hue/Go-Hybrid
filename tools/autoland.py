@@ -139,10 +139,10 @@ def log_event(token_env: str, event: str, verdict: str, note: str, issue: int | 
     if not live:
         print(f"AUTOLAND-LOG(dry-run, not written): {event} {verdict} — {note}")
         return
+    if issue and f"#{issue}" not in note:
+        note = f"#{issue}: {note}"
     cmd = ["python3", "tools/shepherd.py", "--token-env", token_env, "log",
            "--event", event, "--verdict", verdict, "--note", note]
-    if issue:
-        cmd += ["--issue", str(issue)]
     sh(cmd)
 
 
