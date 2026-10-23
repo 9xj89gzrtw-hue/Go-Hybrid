@@ -2745,20 +2745,33 @@ impl<'a> Checker<'a> {
                     let base_ty = self.dir_ty_of_expr(base, env)?;
                     let recv_base = Self::base_named_type(&self.resolve_type_alias(&base_ty))
                         .or_else(|| Self::base_named_type(&base_ty))?;
-                    let m = self
+                    if let Some(m) = self
                         .method_decls
                         .get(&(recv_base, head.to_string()))
                         .or_else(|| {
                             Self::base_named_type(&base_ty)
                                 .and_then(|raw| self.method_decls.get(&(raw, head.to_string())))
-                        })?;
-                    let subst = self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
-                    Some(
-                        m.results
-                            .iter()
-                            .map(|r| Self::substitute_type_params(&r.ty, &subst))
-                            .collect(),
-                    )
+                        })
+                    {
+                        let subst = self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
+                        return Some(
+                            m.results
+                                .iter()
+                                .map(|r| Self::substitute_type_params(&r.ty, &subst))
+                                .collect(),
+                        );
+                    }
+                    // A multi-return call through a `fn`-typed struct field
+                    // (`h.f()` where `f fn() int <-chan int`) carries the same
+                    // result vector as a method of the same name (#1358). The
+                    // field type is the source of truth, so channel directions
+                    // survive into the binding.
+                    let fields = self.struct_fields_for_type(&base_ty)?;
+                    let (_, fty) = fields.into_iter().find(|(f, _)| f == name)?;
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&fty) {
+                        return Some(results);
+                    }
+                    None
                 }
                 other => {
                     let callee_ty = self.dir_ty_of_expr(other, env)?;

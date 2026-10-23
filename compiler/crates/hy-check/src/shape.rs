@@ -1143,9 +1143,28 @@ impl<'a> Checker<'a> {
                         },
                         _ => None,
                     })?;
-                self.method_decls
-                    .get(&(recv_base, head.to_string()))
-                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+                if let Some(f) = self.method_decls.get(&(recv_base, head.to_string())) {
+                    return Some(f.results.iter().map(|r| r.ty.clone()).collect());
+                }
+                // A multi-return call through a `fn`-typed struct field has
+                // the field's declared result vector — without this fallback
+                // `_, rx := h.f()` binds `rx` untyped (#1358).
+                let base_ty = self.ty_of_expr(st, base)?;
+                let resolved = self.resolve_type_alias(&base_ty);
+                let TypeExpr::Named { name: sname, .. } = &resolved else {
+                    return None;
+                };
+                let sbase = Self::base_named_type_str(sname);
+                let (_, fty) = self
+                    .structs
+                    .get(sbase)?
+                    .iter()
+                    .find(|(f, _)| f == name)?
+                    .clone();
+                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&fty) {
+                    return Some(results);
+                }
+                None
             }
             _ => None,
         }
