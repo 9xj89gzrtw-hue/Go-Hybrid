@@ -502,7 +502,7 @@ impl Emitter {
         ty: &TypeExpr,
         fields: &[FieldInit],
     ) -> Result<String, EmitError> {
-        let body = self.field_inits(fields)?;
+        let body = self.field_inits(Some(ty), fields)?;
         let extra = self.n5_missing_fields(ty, fields);
         if extra.is_empty() {
             return Ok(body);
@@ -515,10 +515,39 @@ impl Emitter {
         Ok(parts.join(", "))
     }
 
-    fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
+    fn field_inits(
+        &mut self,
+        ty: Option<&TypeExpr>,
+        fields: &[FieldInit],
+    ) -> Result<String, EmitError> {
+        // Declared field types, when the literal names a user struct: a field
+        // initialized with `none` lowers against its `option[T]` field type
+        // (#1297).
+        let decl_tys: Vec<(String, TypeExpr)> = match ty {
+            Some(TypeExpr::Named { name, .. }) => self
+                .n5_structs
+                .get(name)
+                .map(|ds| {
+                    ds.iter()
+                        .map(|d| (d.name.clone(), d.ty.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let mut parts = Vec::new();
         for f in fields {
-            let v = self.emit_expr(&f.value, 0)?;
+            let expected = decl_tys
+                .iter()
+                .find(|(n, _)| *n == f.name)
+                .map(|(_, t)| t.clone());
+            let v = match expected {
+                Some(t) => {
+                    let text = self.type_text(&t);
+                    self.emit_value_against(&f.value, &text)?
+                }
+                None => self.emit_expr(&f.value, 0)?,
+            };
             parts.push(format!("{}: {}", f.name, v));
         }
         Ok(parts.join(", "))

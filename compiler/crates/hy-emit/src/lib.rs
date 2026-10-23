@@ -513,6 +513,9 @@ pub struct Emitter {
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
+    /// var → rendered Go type text of its declaration (`option[int]`). Used to
+    /// lower `none` in value positions against the declared type (#1297).
+    local_ty_text: BTreeMap<String, String>,
     /// Variables known to hold a pointer type in the current function frame.
     pointer_vars: BTreeSet<String>,
     /// Local/parameter/receiver/result names bound in the current function frame.
@@ -530,6 +533,7 @@ pub(crate) struct ScopeSnapshot {
     bindings: BTreeMap<String, BindingKind>,
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
+    local_ty_text: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
 }
 
@@ -563,6 +567,7 @@ impl Emitter {
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
+            local_ty_text: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
@@ -582,6 +587,7 @@ impl Emitter {
             bindings: self.bindings.clone(),
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
+            local_ty_text: self.local_ty_text.clone(),
             pointer_vars: self.pointer_vars.clone(),
         }
     }
@@ -591,6 +597,7 @@ impl Emitter {
         self.bindings = saved.bindings;
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
+        self.local_ty_text = saved.local_ty_text;
         self.pointer_vars = saved.pointer_vars;
     }
 
@@ -600,6 +607,7 @@ impl Emitter {
             self.bindings.remove(name);
             self.var_ty.remove(name);
             self.var_struct.remove(name);
+            self.local_ty_text.remove(name);
             self.pointer_vars.remove(name);
         }
     }

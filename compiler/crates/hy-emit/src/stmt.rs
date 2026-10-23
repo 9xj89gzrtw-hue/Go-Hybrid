@@ -284,7 +284,7 @@ impl Emitter {
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
-                        let e = self.emit_expr(v, 0)?;
+                        let e = self.emit_value_against(v, t)?;
                         self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
                     }
                     (None, Some(v)) => {
@@ -318,6 +318,13 @@ impl Emitter {
                     }
                     if l.names.len() == 1 && l.names[0] != "_" {
                         self.register_var_ty(&l.names[0], t);
+                    }
+                    if let Some(text) = &ty {
+                        for n in &l.names {
+                            if n != "_" {
+                                self.local_ty_text.insert(n.clone(), text.clone());
+                            }
+                        }
                     }
                 }
                 return Ok(());
@@ -443,6 +450,21 @@ impl Emitter {
             e = inner;
         }
         e
+    }
+
+    /// Lower a value against the type its position declares. `none` is the
+    /// prelude's `option[v]` zero value (`ok: false`), so in a typed value
+    /// position it spells as `option[T]{}` — and the declared type is always
+    /// known at these sites (#1297).
+    pub(crate) fn emit_value_against(
+        &mut self,
+        e: &Expr,
+        expected: &str,
+    ) -> Result<String, EmitError> {
+        if matches!(Self::peel_parens(e), Expr::Ident { name, .. } if name == "none") {
+            return Ok(format!("{}{{}}", expected));
+        }
+        self.emit_expr(e, 0)
     }
 
     /// True if `e` contains a `?` in the current lexical scope (does not
@@ -1318,10 +1340,20 @@ impl Emitter {
             .iter()
             .map(|t| self.emit_place(t))
             .collect::<Result<Vec<_>, _>>()?;
-        let vs = values
-            .iter()
-            .map(|v| self.emit_expr(v, 0))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut vs = Vec::with_capacity(values.len());
+        for (idx, v) in values.iter().enumerate() {
+            // `o = none` against a binding declared `option[T]` (#1297).
+            let declared = match targets.get(idx).map(|t| &t.kind) {
+                Some(PlaceKind::Ident(n)) => self.local_ty_text.get(n).cloned(),
+                _ => None,
+            };
+            match declared {
+                Some(ty) if op == AssignOp::Assign => {
+                    vs.push(self.emit_value_against(v, &ty)?);
+                }
+                _ => vs.push(self.emit_expr(v, 0)?),
+            }
+        }
         self.push(&format!("{} {} {}", ts.join(", "), op_text, vs.join(", ")));
         Ok(())
     }
