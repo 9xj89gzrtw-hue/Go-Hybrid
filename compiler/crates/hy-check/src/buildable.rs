@@ -816,7 +816,40 @@ impl<'a> Collector<'a> {
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
         let kinds = self.infer_local_kinds(l);
         for (name, kind) in l.names.iter().zip(kinds) {
-            self.bind_kind(name, kind);
+            // #1186: a same-scope `:=` re-declaration keeps the EXISTING
+            // variable's type, so a conflicting initializer must be rejected
+            // instead of silently replacing the tracked kind (`a := 1;
+            // a, b := "s", 2` refuses to build).
+            let same_scope_existing = if l.kind == LocalKind::Define && name != "_" {
+                self.kind_scopes
+                    .last()
+                    .and_then(|top| top.get(name.as_str()).cloned())
+            } else {
+                None
+            };
+            let existing_is_let = self
+                .scopes
+                .last()
+                .and_then(|top| top.get(name.as_str()).copied().flatten())
+                .is_some_and(|id| self.defines[id].kind == LocalKind::Let);
+            match same_scope_existing {
+                Some(existing) if !existing_is_let => {
+                    if kinds_conflict(&existing, &kind) {
+                        self.emit_e1002(
+                            l.span,
+                            format!(
+                                "cannot use a value of type `{}` for `{}` (existing type `{}`) in a same-scope `:=` re-declaration — Go keeps the declared type and refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                kind.label(),
+                                name,
+                                existing.label(),
+                                existing.label()
+                            ),
+                            "`:=` in the same scope re-uses the existing variable and its declared type; assign a compatible value or introduce a new name",
+                        );
+                    }
+                }
+                _ => self.bind_kind(name, kind),
+            }
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -858,8 +891,15 @@ impl<'a> Collector<'a> {
         if let Some(ty) = &l.ty {
             return vec![self.kind_of_ty(ty, 0); n];
         }
-        if n == 2 && l.values.len() == 1 {
-            return self.multi_value_kinds(&l.values[0]);
+        if n >= 2 && l.values.len() == 1 {
+            // #1186: `a, b, c := triple()` carries three result kinds and
+            // `a, b := pair_err()?` unwraps the `?`. Both used to collapse to
+            // all-`Unknown`, which hid every operand mismatch downstream.
+            let kinds = self.multi_value_kinds(&l.values[0]);
+            if kinds.len() == n {
+                return kinds;
+            }
+            return vec![OpKind::Unknown; n];
         }
         if n == l.values.len() {
             return l.values.iter().map(|v| self.kind_of_expr(v)).collect();
@@ -870,8 +910,21 @@ impl<'a> Collector<'a> {
     fn multi_value_kinds(&self, e: &Expr) -> Vec<OpKind> {
         match unwrap_parens(e) {
             Expr::Move { operand, .. } => self.multi_value_kinds(operand),
+            // #1186: `pair_err()?` propagates the trailing `error` result and
+            // yields the remaining ones.
+            Expr::Try { operand, .. } => {
+                let mut kinds = self.multi_value_kinds(operand);
+                if self.call_has_error_tail(operand) && !kinds.is_empty() {
+                    kinds.pop();
+                }
+                kinds
+            }
             Expr::Index { base, .. } => match self.kind_of_expr(base) {
                 OpKind::Map(_, v) => vec![*v, OpKind::Bool],
+                // A slice/array/string index has no comma-ok form: the
+                // binding-count rule (E2002) owns the multi-name case.
+                OpKind::Slice(e) | OpKind::Array(e) => vec![*e],
+                OpKind::Str => vec![OpKind::Str],
                 _ => vec![OpKind::Unknown, OpKind::Bool],
             },
             Expr::Receive { chan, .. } => match self.kind_of_expr(chan) {
@@ -881,12 +934,48 @@ impl<'a> Collector<'a> {
             Expr::Call { callee, args, .. } => {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() >= 2 {
-                        return vec![res[0].clone(), res[1].clone()];
+                        // #1186: keep every result — `a, b, c := triple()`
+                        // must classify `c` too.
+                        return res;
                     }
                 }
-                vec![OpKind::Unknown, OpKind::Unknown]
+                // Not a multi-value source after all: one kind at most, so the
+                // count rules (`is_definitely_single_value`) own the shape.
+                vec![OpKind::Unknown]
             }
-            _ => vec![OpKind::Unknown, OpKind::Unknown],
+            _ => vec![OpKind::Unknown],
+        }
+    }
+
+    /// Does `e` evaluate to a call whose declared result list ends in `error`?
+    /// `multi_value_kinds` needs this to model `call()?` (#1186).
+    fn call_has_error_tail(&self, e: &Expr) -> bool {
+        let Expr::Call { callee, .. } = unwrap_parens(e) else {
+            return false;
+        };
+        let declared = |results: &[hy_syntax::FnResult]| {
+            matches!(
+                results.last().map(|r| &r.ty),
+                Some(TypeExpr::Named { name, .. }) if name == "error"
+            )
+        };
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                let head = Checker::base_named_type_str(name);
+                self.ck
+                    .fns
+                    .get(name.as_str())
+                    .or_else(|| self.ck.fns.get(head))
+                    .is_some_and(|f| declared(&f.results))
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                self.struct_base_name(&bk)
+                    .and_then(|sn| self.ck.method_decls.get(&(sn, head.to_string())))
+                    .is_some_and(|m| declared(&m.results))
+            }
+            _ => false,
         }
     }
 
@@ -2220,6 +2309,19 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// The expanded result kinds of a lone multi-value call argument (#1186).
+    fn multi_value_arg_kinds(&self, args: &[CallArg]) -> Option<Vec<OpKind>> {
+        if args.len() != 1 {
+            return None;
+        }
+        let kinds = self.multi_value_kinds(&args[0].value);
+        if kinds.len() >= 2 {
+            Some(kinds)
+        } else {
+            None
+        }
+    }
+
     /// #577 C9 — a closure or `fn`-typed value whose declared parameter count
     /// is known (`f := fn(x int) int {...}; f(1, 2)`).
     fn report_local_arity(&mut self, name: &str, want: usize, got: usize, span: Span) {
@@ -2328,6 +2430,12 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
+        // #1186: a lone multi-value call expands to one argument per result,
+        // so the written `args.len()` is not the effective count.
+        // `check_multi_value_arg_arity` owns that comparison.
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
         let (want, got) = (m.params.len(), args.len());
         if want == got {
             return;
@@ -2370,7 +2478,27 @@ impl<'a> Collector<'a> {
         if !f.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(kinds) = self.multi_value_arg_kinds(args) {
+            // #1186: `take_ints(two_strings())` expands positionally, so each
+            // result must still be assignable to its parameter.
+            if f.params.len() == kinds.len() {
+                for (p, k) in f.params.iter().zip(kinds.iter()) {
+                    let want = self.kind_of_ty(&p.ty, 0);
+                    if kinds_conflict(&want, k) {
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use an expanded result of type `{}` as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                                k.label(),
+                                want.label(),
+                                name
+                            ),
+                            "a multi-value call expands positionally; each result must be assignable to the matching parameter",
+                        );
+                        break;
+                    }
+                }
+            }
             return;
         }
         if f.params.len() != args.len() {
@@ -2410,7 +2538,28 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(kinds) = self.multi_value_arg_kinds(args) {
+            // #1186: `s.pair(mixed())` — same positional expansion rule as a
+            // plain function call.
+            if m.params.len() == kinds.len() {
+                for (p, k) in m.params.iter().zip(kinds.iter()) {
+                    let want = self.kind_of_ty(&p.ty, 0);
+                    if kinds_conflict(&want, k) {
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use an expanded result of type `{}` as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                                k.label(),
+                                want.label(),
+                                sn,
+                                name
+                            ),
+                            "a multi-value call expands positionally; each result must be assignable to the matching parameter",
+                        );
+                        break;
+                    }
+                }
+            }
             return;
         }
         if m.params.len() != args.len() {
@@ -2565,14 +2714,32 @@ impl<'a> Collector<'a> {
         let Some(n) = self.multi_value_arg_count(args) else {
             return;
         };
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return;
+        // #1186: methods carry the receiver separately, so `s.pair(mixed())`
+        // is legal exactly when the method declares two parameters.
+        let (label, want) = match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                let head = Checker::base_named_type_str(name);
+                let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+                    return;
+                };
+                (name.clone(), f.params.len())
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                if let Some(m) = self
+                    .struct_base_name(&bk)
+                    .and_then(|sn| self.ck.method_decls.get(&(sn, head.to_string())))
+                {
+                    (format!("{}.{}", base.render(), name), m.params.len())
+                } else if let Some(OpKind::Fn(_, Some(want))) = self.struct_field_kind(&bk, name) {
+                    (format!("{}.{}", base.render(), name), want)
+                } else {
+                    return;
+                }
+            }
+            _ => return,
         };
-        let head = Checker::base_named_type_str(name);
-        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
-            return;
-        };
-        let want = f.params.len();
         if want == n {
             return;
         }
@@ -2580,11 +2747,11 @@ impl<'a> Collector<'a> {
             span,
             format!(
                 "`{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
-                name,
+                label,
                 if want == 1 { "" } else { "s" },
                 if n == 1 { "" } else { "s" },
                 if n < want { "not enough" } else { "too many" },
-                name
+                label
             ),
             "a multi-value call expands to one argument per result; the callee must accept exactly that many",
         );
@@ -3060,11 +3227,34 @@ impl<'a> Collector<'a> {
                         }
                     }
                 } else if targets.len() > 1 && values.len() == 1 {
-                    // One provably-single value bound to several targets —
-                    // go build refuses with `assignment mismatch`. Call,
-                    // receive, and index sources are owned by the
-                    // source-count rules.
-                    if is_definitely_single_value(&values[0]) {
+                    // #1186: a multi-value source binds one target per
+                    // result, so every positional pair must satisfy the same
+                    // kind check as a parallel assignment. `a, b =
+                    // two_strings()` with `int` targets used to slip through
+                    // and fail only in `go build`.
+                    let kinds = self.multi_value_kinds(&values[0]);
+                    if kinds.len() == targets.len() {
+                        for (t, k) in targets.iter().zip(kinds.iter()) {
+                            let tpk = self.kind_of_place(t);
+                            if kinds_conflict(&tpk, k) {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "cannot assign a value of type `{}` to `{}` (type `{}`) in a multi-value assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                        k.label(),
+                                        t.render(),
+                                        tpk.label(),
+                                        tpk.label()
+                                    ),
+                                    "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                                );
+                            }
+                        }
+                    } else if is_definitely_single_value(&values[0]) {
+                        // One provably-single value bound to several targets —
+                        // go build refuses with `assignment mismatch`. Call,
+                        // receive, and index sources are owned by the
+                        // source-count rules.
                         self.emit_e1002(
                             span,
                             format!(
