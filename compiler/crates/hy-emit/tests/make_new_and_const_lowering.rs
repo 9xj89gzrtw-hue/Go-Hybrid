@@ -59,3 +59,20 @@ fn emit_parenthesized_composite_const_rewritten_to_var() {
         go
     );
 }
+
+#[test]
+fn emit_new_on_array_literal_keeps_the_array_type() {
+    // #1356: `new([4]u8{})` is the zero value of a pointer-to-array, not the
+    // zero value of a slice of arrays.
+    let go = emit("fn main() {\n    pa := new([4]u8{})\n    fmt.println(pa)\n}\n").expect("must emit");
+    assert!(go.contains("new([4]uint8)"), "got:\n{}", go);
+    assert!(!go.contains("new([][4]uint8)"), "got:\n{}", go);
+}
+
+#[test]
+fn emit_make_on_parenthesized_empty_slice_literal_stays_a_slice() {
+    // #1356: the array guard must look at the un-parenthesized target.
+    let go = emit("fn main() {\n    s := make(([]int{}), 0)\n    fmt.println(len(s))\n}\n")
+        .expect("must emit");
+    assert!(go.contains("make([]int, 0)"), "got:\n{}", go);
+}
