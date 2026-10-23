@@ -4273,6 +4273,95 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+            // #807: `min`/`max` accept ordered operands (numbers and strings)
+            // of one type; Go rejects `min(1, "foo")` with `invalid argument:
+            // "foo" (variable of type string) cannot be used as type int`.
+            "min" | "max" => {
+                if args.is_empty() {
+                    return; // arity handled by builtins.rs
+                }
+                let mut first: Option<OpKind> = None;
+                for a in args {
+                    let k = self.kind_of_expr(&a.value);
+                    if !matches!(
+                        k,
+                        OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str
+                    ) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `{}`) for built-in `{}`: the operand type is not ordered (HYB-E2005)",
+                                a.value.render(),
+                                k.label(),
+                                name
+                            ),
+                            "`min`/`max` accept ordered operands — numbers or strings — of a single type",
+                        );
+                        return;
+                    }
+                    match &first {
+                        None => first = Some(k),
+                        Some(f) if kinds_conflict(f, &k) => {
+                            self.emit_e2005(
+                                span,
+                                format!(
+                                    "arguments to `{}` have incompatible types: `{}` and `{}` (HYB-E2005)",
+                                    name,
+                                    f.label(),
+                                    k.label()
+                                ),
+                                "every `min`/`max` operand must have the same ordered type",
+                            );
+                            return;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            // #807: `complex` takes two numeric operands. The kind model has no
+            // `Complex` variant (`complex128` resolves to `Unknown`), so this
+            // stays fail-open for numeric/unknown operands and only rejects
+            // evidence Go refuses (`complex("a", "b")`, `complex(true, 1)`).
+            "complex" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                for a in args {
+                    let k = self.kind_of_expr(&a.value);
+                    if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Float) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `{}`) for built-in `complex`: operands must be numeric (HYB-E2005)",
+                                a.value.render(),
+                                k.label()
+                            ),
+                            "`complex(real, imag)` requires two float operands",
+                        );
+                        return;
+                    }
+                }
+            }
+            // #807: `real`/`imag` take one complex operand; a string or slice
+            // is provably not complex.
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let k = self.kind_of_expr(&args[0].value);
+                if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Float) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{}`) for built-in `{}`: expected a complex operand (HYB-E2005)",
+                            args[0].value.render(),
+                            k.label(),
+                            name
+                        ),
+                        "`real`/`imag` take a single complex value",
+                    );
+                }
+            }
             _ => {}
         }
     }

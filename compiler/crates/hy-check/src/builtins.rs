@@ -270,6 +270,22 @@ impl<'a> Checker<'a> {
         if self.fns.contains_key(name) {
             return;
         }
+        // #807: Go forbids `...` on every builtin except the variadic
+        // `append`, `print`, and `println`; the emitted call fails `go build`
+        // with `cannot use ... in call to <name>`.
+        if !matches!(name, "append" | "print" | "println") {
+            if let Some(a) = args.iter().find(|a| a.spread) {
+                self.emit_builtin(
+                    span,
+                    format!(
+                        "`{}` does not accept a spread argument `{}...` — Go refuses `cannot use ... in call to {}` (HYB-E2005)",
+                        name,
+                        a.value.render(),
+                        name
+                    ),
+                );
+            }
+        }
         match name {
             "make" => self.check_make_args(args, span),
             "len" => self.check_len_cap_args("len", args, span, /*cap=*/ false),
