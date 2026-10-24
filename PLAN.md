@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — author-stage rejection evidence (2026-10-24)
+
+- Base `1f0ff978`: the author-stage repro gate treats any nonzero checker exit as rejection and matches expected diagnostic codes by substring. Require the checker's documented rejection exit 1 and an exact diagnostic token; failures follow the existing rollback/retry/BLOCKED path.
+- Eight offline orchestration regressions use real temporary Git repositories and a real checker-fixture subprocess; model/build are explicit stubs. Baseline 4 failures/4 passes; patched 8/8. All 395 top-level Python tooling tests pass; registration/conflict-marker guards and diff check pass. Compiler behavior is not tested by these fixtures; Go/Rust are unavailable locally, and upstream CI and any discretionary bounty award remain pending.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
