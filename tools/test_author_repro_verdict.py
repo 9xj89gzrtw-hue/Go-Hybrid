@@ -22,6 +22,12 @@ SPEC = importlib.util.spec_from_file_location(
 AUTHOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUTHOR)
 
+SPECIALIZED_SPEC = importlib.util.spec_from_file_location(
+    "specialized_verdict_subject", Path(__file__).with_name("specialized_brain.py")
+)
+SPECIALIZED = importlib.util.module_from_spec(SPECIALIZED_SPEC)
+SPECIALIZED_SPEC.loader.exec_module(SPECIALIZED)
+
 CONTROL = "tests/checker-corpus/accept.hy"
 DIFF = """diff --git a/compiler/example.rs b/compiler/example.rs
 --- a/compiler/example.rs
@@ -138,6 +144,75 @@ class AuthorReproVerdictTests(unittest.TestCase):
 
     def test_exit_one_without_expected_code_keeps_existing_contract(self):
         self.assertEqual(self.run_author(output="rejected", expected=False), 0)
+
+
+class SpecializedReproVerdictTests(unittest.TestCase):
+    """Real checker processes; Cargo and later corpus gates are explicit stubs."""
+
+    def run_smoke(self, status=1, output="error[HYB-E6002]: rejected", expected="HYB-E6002"):
+        with tempfile.TemporaryDirectory(prefix="specialized-verdict-") as directory:
+            root = Path(directory)
+            checker = root / "fake-hyb"
+            checker.write_text(
+                "#!" + sys.executable + "\nimport sys, os, signal\n"
+                + "print(" + repr(output) + ", flush=True)\n"
+                + ("os.kill(os.getpid(), signal.SIGTERM)\n" if status < 0
+                   else "sys.exit(" + str(status) + ")\n"), encoding="utf-8",
+            )
+            checker.chmod(0o755)
+            real_sh = SPECIALIZED.sh
+            later_gates = []
+
+            def shell(args, **kwargs):
+                if args[0] == "cargo":
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                if args[0] == "python3":
+                    later_gates.append(args[1])
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                return real_sh(args, **kwargs)
+
+            with contextlib.ExitStack() as stack:
+                for name, value in {
+                    "ROOT": root, "COMPILER": root, "HYB": checker,
+                    "SMOKE_DIR": root / "smoke", "ACCEPT_CONTROLS": [],
+                }.items():
+                    stack.enter_context(patch.object(SPECIALIZED, name, value))
+                stack.enter_context(patch.object(SPECIALIZED, "sh", side_effect=shell))
+                verdict, reason = SPECIALIZED.smoke("repro.hy", expected, [])
+            return verdict, reason, later_gates
+
+    def assert_not_rejection(self, **kwargs):
+        verdict, reason, later = self.run_smoke(**kwargs)
+        self.assertFalse(verdict, reason)
+        self.assertEqual(later, [], "invalid repro evidence must stop before later gates")
+
+    def test_invocation_error_with_code_stops(self):
+        self.assert_not_rejection(status=2)
+
+    def test_signal_with_code_stops(self):
+        self.assert_not_rejection(status=-15)
+
+    def test_longer_code_stops(self):
+        self.assert_not_rejection(output="error[HYB-E60020]: rejected")
+
+    def test_invocation_error_without_expected_code_stops(self):
+        self.assert_not_rejection(status=2, expected="")
+
+    def test_accept_exit_still_stops(self):
+        self.assert_not_rejection(status=0)
+
+    def test_missing_code_still_stops(self):
+        self.assert_not_rejection(output="error[HYB-E1002]: rejected")
+
+    def test_exact_rejection_reaches_later_gates(self):
+        verdict, reason, later = self.run_smoke()
+        self.assertTrue(verdict, reason)
+        self.assertEqual(later, ["tools/corpus_harness.py", "tools/check_corpus_census.py"])
+
+    def test_unspecified_rejection_keeps_contract(self):
+        verdict, reason, later = self.run_smoke(output="rejected", expected="")
+        self.assertTrue(verdict, reason)
+        self.assertEqual(len(later), 2)
 
 
 if __name__ == "__main__":

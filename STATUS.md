@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor #1598 follow-up (2026-10-24): specialized smoke gate also requires rejection exit 1 and an exact diagnostic token. Eight new process regressions; four fail before, sixteen combined pass after. New-head compiler CI/review pending.
+
 - Contributor candidate (2026-10-24): author-stage repro evidence distinguishes checker failure from rejection and requires an exact diagnostic token. Eight subprocess/Git regressions, baseline 4 failures. No compiler soundness claim; see PLAN.md. Upstream review/CI pending.
 
 - AUTOMATION (session-35): **the daily human-chore is gone** — triage-board.yml now runs `triage_bot.py approve --max 60` every 04:30 UTC after the board post (board FIRST: run 39897148251 proved the approve POSTs drain the shared per-repo GITHUB_TOKEN hour pool and RateGuard kills the scan otherwise; approve is best-effort with continue-on-error) · session-side sweep cleared 172 pending action_required runs (all 3 per-PR workflows, 0 left at 03:56Z) · `triage_bot.Gh.req` now retries rate-limit 403s with 5/20/45s backoff (GitHub secondary limits surface as 403, not 429; shepherd.py inherits via the shared Gh class) · BOT AUDIT: board #940 fresh, stale+rebase green on schedule, autoland gates proven honest (758/827/929/905 landed via session-side autoland.py per the session-34 GH006 finding — the workflow push transport remains the missing infra: bundle→branch→PR→checks→auto-merge)
