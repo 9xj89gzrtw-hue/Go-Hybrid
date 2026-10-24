@@ -737,7 +737,12 @@ impl Emitter {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                (f.name.clone(), (f.results.len(), err, kind, ptr_params))
+                // E3: a trailing error result is the error slot, not a value.
+                // `fn step() error` has ONE Go result; counting it as a value
+                // made the ? hoister emit `hyT0, hyErr1 := step()` against a
+                // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
+                let value_count = if err { f.results.len() - 1 } else { f.results.len() };
+                (f.name.clone(), (value_count, err, kind, ptr_params))
             })
             .collect();
 
