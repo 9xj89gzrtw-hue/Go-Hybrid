@@ -242,8 +242,16 @@ impl<'a> Checker<'a> {
         // `move x` — class 3; validate that `x` resolves to a movable shape
         // (never Unknown, Closure, BorrowHandle, or ForeignOpaque).
         if let Expr::Move { operand, .. } = unwrap_parens(expr) {
-            if let Expr::Ident { name, .. } = unwrap_parens(operand) {
+            let op = unwrap_parens(operand);
+            if let Expr::Ident { name, .. } = op {
                 return self.classify_move_ident(st, name);
+            }
+            if matches!(op, Expr::Field { .. })
+                && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
+            {
+                if let Some(root) = op.root_ident() {
+                    return self.classify_move_ident(st, root);
+                }
             }
             return Outcome::Ok;
         }
@@ -1203,10 +1211,24 @@ impl<'a> Checker<'a> {
                             moves.push((root.to_string(), v.span()));
                         }
                     }
-                } else if !managed {
+                } else {
                     self.check_o54_non_ident_move(st, op, v.span());
+                    if let Some(root) = op.root_ident() {
+                        if self.lookup_binding(st, root).is_some() {
+                            moves.push((root.to_string(), v.span()));
+                        }
+                    }
                 }
-                if let Expr::Ident { name, .. } = op {
+                let move_root = match op {
+                    Expr::Ident { name, .. } => Some(name.as_str()),
+                    Expr::Field { .. }
+                        if matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_)) =>
+                    {
+                        op.root_ident()
+                    }
+                    _ => None,
+                };
+                if let Some(name) = move_root {
                     match self.classify_move_ident(st, name) {
                         Outcome::Ok => {}
                         Outcome::Managed { desc, risky } => {
@@ -1247,8 +1269,13 @@ impl<'a> Checker<'a> {
                             moves.push((root.to_string(), mspan));
                         }
                     }
-                } else if !managed {
+                } else {
                     self.check_o54_non_ident_move(st, op, mspan);
+                    if let Some(root) = op.root_ident() {
+                        if self.lookup_binding(st, root).is_some() {
+                            moves.push((root.to_string(), mspan));
+                        }
+                    }
                 }
             }
 
