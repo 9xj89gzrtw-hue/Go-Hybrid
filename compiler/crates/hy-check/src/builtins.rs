@@ -11,7 +11,7 @@
 
 use crate::model::{unwrap_parens, Checker};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
+use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
 
 impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
@@ -454,17 +454,17 @@ impl<'a> Checker<'a> {
             } if items.is_empty() && unwrapped.as_array_lit().is_none() => MakeTargetKind::Slice,
             Expr::MapLit { entries, .. } if entries.is_empty() => MakeTargetKind::Map,
             Expr::StructLit {
-                ty: Some(hy_syntax::TypeExpr::Chan { .. }),
+                ty: Some(hy_syntax::TypeExpr::Chan { dir, .. }),
                 fields,
                 ..
-            } if fields.is_empty() => MakeTargetKind::Chan,
+            } if fields.is_empty() => MakeTargetKind::Chan(*dir),
             Expr::Ident { name, .. } => {
                 let base = Self::base_named_type_str(name);
                 if let Some(ty) = self.type_aliases.get(base) {
                     match self.resolve_type_alias(ty) {
                         hy_syntax::TypeExpr::Slice { .. } => MakeTargetKind::Slice,
                         hy_syntax::TypeExpr::Map { .. } => MakeTargetKind::Map,
-                        hy_syntax::TypeExpr::Chan { .. } => MakeTargetKind::Chan,
+                        hy_syntax::TypeExpr::Chan { dir, .. } => MakeTargetKind::Chan(dir),
                         _ => MakeTargetKind::Invalid,
                     }
                 } else {
@@ -508,7 +508,7 @@ impl<'a> Checker<'a> {
                     return;
                 }
             }
-            MakeTargetKind::Map | MakeTargetKind::Chan => {
+            MakeTargetKind::Map => {
                 if args.len() > 2 {
                     self.emit_builtin(
                         span,
@@ -516,6 +516,31 @@ impl<'a> Checker<'a> {
                             "`make` requires 1 or 2 arguments (type[, size]) — or 3 for a slice (type, len, cap) — found {} (HYB-E2005)",
                             args.len()
                         ),
+                    );
+                    return;
+                }
+            }
+            MakeTargetKind::Chan(dir) => {
+                if args.len() > 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`make` requires 1 or 2 arguments (type[, size]) — or 3 for a slice (type, len, cap) — found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                    return;
+                }
+                // Go §Making slices, maps and channels: "The channel type
+                // must be bidirectional." A directional make target emits
+                // `make(chan<- T)` / `make(<-chan T)`, which `go build`
+                // rejects at compile time — the same
+                // accepted-should-buildable contract.
+                if dir != ChanDir::Both {
+                    self.emit_builtin(
+                        span,
+                        "`make` requires a bidirectional channel type — cannot make a send-only or receive-only channel (HYB-E2005)"
+                            .to_string(),
                     );
                     return;
                 }
@@ -604,7 +629,7 @@ impl<'a> Checker<'a> {
 enum MakeTargetKind {
     Slice,
     Map,
-    Chan,
+    Chan(ChanDir),
     Invalid,
 }
 
