@@ -1,5 +1,6 @@
 # Hybrid Language: Development Plan
 
+- Contributor amendment (2026-10-28, #1165): range bounds are compared as emitted Go integer types, so equivalent SPEC/Go spellings (`u8`/`uint8`/`byte`, `i32`/`int32`/`rune`) no longer raise a false HYB-E2009, while `int`/`int64`, `uint`/`uintptr` and the undefined `usize`/`isize` stay distinct. One shared canonicaliser (`canonical_int_type_name` in `hy-check`) plus a regression pin in `range_bound_type_forms.rs`. Workspace, corpus, differential and CI remain delivery gates.
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
