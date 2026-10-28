@@ -1223,6 +1223,15 @@ channels. Zero value: the zero channel (N3). Channels are
 **safe-by-type**: sharing a channel across tasks is exactly what channels
 are for (O4 class 2) — a channel passed to a spawn needs no `move`.
 
+The producer/consumer roles are checked on the **operand**, not only on a bare
+identifier: a channel reached through a composite expression is resolved to the
+channel it denotes, so `<-chs[0]`, `<-chs[i:]`, `<-append(chs, ch)[0]` and
+`<-outer[0][0]` are all judged by the direction of the channel they produce.
+A receive from a send-only channel is rejected wherever it appears
+(HYB-E2008); an operand whose direction cannot be resolved from its shape
+stays fail-closed (HYB-E3005). The send side resolves the same projections,
+so the two directions agree.
+
 ```hy
 // fragment:
 jobs := make(chan job, 16)
