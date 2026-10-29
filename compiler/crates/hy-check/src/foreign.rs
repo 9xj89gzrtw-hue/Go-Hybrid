@@ -311,26 +311,81 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         return CallMode::Safe;
     }
     match (recv_type, method) {
+        // #2200 / foreign-surface drift: this list must be a SUBSET of
+        // hy-emit's SHAPES members for the same key (shapes.rs, "serde_json.value":
+        // array, int, string, set, push_string) and of the Go methods the
+        // vendored binding actually ships (runtime/go/jsonbinding: Array, Int,
+        // String, Set, PushString). `get`, `remove` and `to_string_pretty` are
+        // NOT methods on a Value — they are package-level names (and only
+        // `to_string_pretty` is in the pinned binding surface at all). Blessing
+        // them here made `doc.get("a")` pass `hyb check` and then fail
+        // `go build` with `doc.Get undefined (type jsonbinding.Value has no
+        // field or method Get)`. Keep the two tables in lockstep; the
+        // cross-crate test `foreign_method_surface_matches_emitter_shapes`
+        // fails if they drift apart again.
         (
             "serde_json.value" | "serde_json.view",
-            "array" | "get" | "int" | "string" | "to_string_pretty",
+            "array" | "int" | "string",
         ) => CallMode::Borrow,
-        ("serde_json.value" | "serde_json.view", "set" | "remove") => CallMode::Mutate,
+        ("serde_json.value" | "serde_json.view", "set") => CallMode::Mutate,
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,
         _ => CallMode::Unknown,
     }
 }
 
+/// The COMPLETE method surface of a foreign handle type, or `None` when
+/// `recv_type` is not a handle this module models.
+///
+/// `method_mode`/`method_result` are deliberately fail-open (`Unknown`), which
+/// is right for shapes the checker cannot see — but a handle whose binding is
+/// vendored in `runtime/go/` is perfectly visible, and Go will reject any name
+/// outside its surface at `go build` with `<recv>.<Name> undefined (type
+/// <T> has no field or method <Name>)`. Returning the surface here lets a
+/// caller fail CLOSED on those exact names instead of blessing them (#2200).
+///
+/// This list is the single source of truth for handle METHODS. It must stay a
+/// subset of `hy-emit`'s SHAPES members for the matching key, and of the Go
+/// methods `runtime/go/*binding` actually ships;
+/// `foreign_method_surface_matches_emitter_shapes` pins that agreement.
+pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'static str]> {
+    /// `serde_json.value`: jsonbinding.Value — Array, Int, String, Set,
+    /// PushString. Package-level `Parse`/`NewObject`/`NewArray`/
+    /// `ToStringPretty` are functions, NOT methods, and `Get`/`Remove` are
+    /// not shipped at all.
+    const SERDE_JSON_VALUE: &[&str] = &["array", "int", "string", "set", "push_string"];
+    /// `flate2.writer`: the A7 consume-mode fixture (deliberately unbound,
+    /// see UNBOUND_RUST_CRATES — the surface is still pinned so the checker
+    /// does not invent names).
+    const FLATE2_WRITER: &[&str] = &["write", "finish"];
+    /// Scalar atomics (`atomic.int64` and friends) — the predeclared Go type's
+    /// own methods. `compare_and_swap` is the Hybrid spelling of
+    /// `CompareAndSwap`.
+    const ATOMIC_SCALAR: &[&str] = &["load", "store", "add", "swap", "compare_and_swap"];
+    match recv_type {
+        // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
+        // depending on context: ranging `doc.array(k)` yields element
+        // `jsonbinding.Value` handles (real methods), while the `array` result
+        // itself binds to a plain `[]jsonbinding.Value` slice with no methods
+        // at all (`len(v)` is the call form, not `v.len()`). The checker
+        // cannot tell the two apart from the shape alone, so rejecting names
+        // here would break legal element code — view stays fail-open.
+        "serde_json.value" => Some(SERDE_JSON_VALUE),
+        "flate2.writer" => Some(FLATE2_WRITER),
+        _ if recv_type == "atomic.int" || is_scalar_atomic(recv_type) => Some(ATOMIC_SCALAR),
+        _ => None,
+    }
+}
+
 /// Result shape of a method call on a typed receiver.
 pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
     match (recv_type, method) {
-        ("serde_json.value" | "serde_json.view", "array" | "get") => {
+        ("serde_json.value" | "serde_json.view", "array") => {
             // element views: iterating the result yields borrow handles
             TypeShape::BorrowHandle("serde_json.view".into())
         }
         ("serde_json.value" | "serde_json.view", "int") => TypeShape::Primitive,
-        ("serde_json.value" | "serde_json.view", "string" | "to_string_pretty") => TypeShape::Str,
+        ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
