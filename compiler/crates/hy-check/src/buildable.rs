@@ -2251,6 +2251,42 @@ impl<'a> Collector<'a> {
                     Some(res.len())
                 }
             }
+            // `f()?` unwraps the trailing `error` result. A void fallible
+            // function therefore yields no value and a multi-value one still
+            // yields its remaining N-1 values; both are illegal in a
+            // single-value position. A `(T, error)` call unwraps to exactly
+            // one value and stays legal.
+            Expr::Try { operand, .. } => {
+                let Expr::Call { callee, args, .. } = unwrap_parens(operand) else {
+                    return None;
+                };
+                // `f()?` unwraps a trailing `error`. Only a local fn or a
+                // closure has a declared result list; a boundary or handle
+                // method (`doc.array("users")?`) is fail-open.
+                let results: &[FnResult] = match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => match self.ck.fns.get(name.as_str()) {
+                        Some(f) => &f.results,
+                        None => return None,
+                    },
+                    Expr::FnLit { results, .. } => results,
+                    _ => return None,
+                };
+                // A `?` on a non-error result is an accepted Hybrid no-op; do
+                // not reinterpret it as a void unwrap.
+                if !matches!(
+                    results.last().map(|r| &r.ty),
+                    Some(TypeExpr::Named { name, .. }) if name == "error"
+                ) {
+                    return None;
+                }
+                let res = self.call_result_kinds(callee, args)?;
+                let effective = res.len().saturating_sub(1);
+                if effective == 1 {
+                    None
+                } else {
+                    Some(effective)
+                }
+            }
             _ => None,
         }
     }
