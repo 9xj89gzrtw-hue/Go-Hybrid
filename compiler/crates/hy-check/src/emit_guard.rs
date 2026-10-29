@@ -2056,7 +2056,33 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        None
+        // #1915: nested expressions over typed constants. Go folds the whole
+        // constant expression and range-checks the result, so the operand's
+        // fixed-width type propagates through unary negation, shifts and
+        // binary operations with an untyped constant on the other side.
+        match e {
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.fixed_width_int_ty_of(st, operand),
+            Expr::Binary {
+                op: BinOp::Shl | BinOp::Shr,
+                lhs,
+                ..
+            } => self.fixed_width_int_ty_of(st, lhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                let lt = self.fixed_width_int_ty_of(st, lhs);
+                let rt = self.fixed_width_int_ty_of(st, rhs);
+                match (lt, rt) {
+                    (Some(a), Some(b)) if a.0 == b.0 => Some(a),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// #725 — the folded result of a TYPED constant expression must stay
