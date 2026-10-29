@@ -576,8 +576,11 @@ impl<'a> Collector<'a> {
         // enum, a type alias, or a built-in conversion target. Anything else
         // stays fail-open.
         let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.struct_type_params.contains_key(head)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
+            || name == "any"
+            || name == "error"
             || crate::const_init::is_conversion_type_name(name);
         if !is_declared_type {
             return;
