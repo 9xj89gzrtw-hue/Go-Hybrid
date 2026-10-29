@@ -3908,6 +3908,21 @@ impl<'a> Collector<'a> {
                     }
                 } else if name == "pop" {
                     self.check_slice_pop_operands(base, &bk, args, span);
+                    // `pop` is also a built-in slice operation, so this branch
+                    // is entered before the missing-member check below. A
+                    // struct or pointer only has `.pop()` if it declares the
+                    // method; without one Go refuses the call with
+                    // "<base>.pop undefined (type ... has no field or method pop)".
+                    if !has_method && matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_)) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`{}` has no field or method `pop` (HYB-E1002)",
+                                base.render()
+                            ),
+                            "a struct or pointer supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
+                        );
+                    }
                 } else if !has_method {
                     // #682 U2/U3: neither a declared method nor a field exists
                     // on the base. Go refuses the call with `<base>.<name>
