@@ -228,3 +228,60 @@ fn phantom_sync_rwmutex_method_is_rejected_but_real_ones_accept() {
     assert_eq!(good.verdict, Verdict::Accept, "got {:?}", good.diagnostics);
 }
 
+
+// --- Atomics stay fail-open (learned in review) --------------------------
+//
+// An earlier revision of the #2200 fix also gated the scalar atomics on a
+// single ATOMIC_SCALAR list. That was wrong in BOTH directions, because
+// receiver_type_name collapses every TypeShape::Atomic onto the one key
+// `atomic.int` -- the shape carries no element type, so the checker cannot
+// tell `atomic.bool` from `atomic.int64`. Their real Go surfaces differ:
+//
+//   * Bool has no Add/And/Or        -> the union blesses a phantom method.
+//   * the integer atomics DO have And/Or (Go 1.23+), so the intersection
+//     rejects real methods that `go build` accepts.
+//
+// Neither list is correct, so atomics are deliberately left fail-open until
+// TypeShape::Atomic can carry its element type. These two tests pin that
+// decision so a later revision cannot silently reintroduce a half-correct
+// surface.
+
+#[test]
+fn atomic_integer_and_or_stay_accepted() {
+    // sync/atomic.Int64.And/.Or exist since Go 1.23 and `go build` accepts
+    // them. A surface that omits them would be a NEW false rejection.
+    let src = concat!(
+        "fn main() {\n",
+        "    var h atomic.int64\n",
+        "    h.store(6)\n",
+        "    h.and(3)\n",
+        "    h.or(2)\n",
+        "    fmt.println(\"v={h.load()}\")\n",
+        "}\n",
+    );
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept, "got {:?}", r.diagnostics);
+}
+
+#[test]
+fn atomic_bool_stays_fail_open_rather_than_half_gated() {
+    // atomic.Bool has no Add, so this is a real (unfixed) bug of the #2200
+    // class -- but it cannot be fixed from the shape alone without breaking
+    // atomic.Int64.And. Pinned as KNOWN fail-open: if the surface is later
+    // split per element type, this test flipping to Reject is the signal that
+    // the shape model was fixed. Update it deliberately; do not delete it.
+    let src = concat!(
+        "fn main() {\n",
+        "    var b atomic.bool\n",
+        "    b.store(true)\n",
+        "    b.add(true)\n",
+        "    fmt.println(\"v={b.load()}\")\n",
+        "}\n",
+    );
+    let r = check(src);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "atomic surface became type-aware -- if bool now rejects, that is an improvement; update this test and the note in foreign.rs",
+    );
+}

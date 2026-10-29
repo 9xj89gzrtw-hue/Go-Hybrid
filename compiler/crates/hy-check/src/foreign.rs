@@ -320,9 +320,10 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         // `to_string_pretty` is in the pinned binding surface at all). Blessing
         // them here made `doc.get("a")` pass `hyb check` and then fail
         // `go build` with `doc.Get undefined (type jsonbinding.Value has no
-        // field or method Get)`. Keep the two tables in lockstep; the
-        // cross-crate test `foreign_method_surface_matches_emitter_shapes`
-        // fails if they drift apart again.
+        // field or method Get)`. Keep the two tables in lockstep by hand:
+        // hy-check does not depend on hy-emit (that would be a crate cycle), so
+        // no automated cross-crate pin is possible. The same-surface tests in
+        // `tests/foreign_method_surface.rs` cover the checker side.
         (
             "serde_json.value" | "serde_json.view",
             "array" | "int" | "string",
@@ -346,8 +347,9 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
 ///
 /// This list is the single source of truth for handle METHODS. It must stay a
 /// subset of `hy-emit`'s SHAPES members for the matching key, and of the Go
-/// methods `runtime/go/*binding` actually ships;
-/// `foreign_method_surface_matches_emitter_shapes` pins that agreement.
+/// methods `runtime/go/*binding` actually ships. That agreement is maintained
+/// by hand: `hy-check` cannot depend on `hy-emit` without a crate cycle, so
+/// there is no automated cross-crate pin.
 pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'static str]> {
     /// `serde_json.value`: jsonbinding.Value — Array, Int, String, Set,
     /// PushString. Package-level `Parse`/`NewObject`/`NewArray`/
@@ -358,10 +360,6 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     /// see UNBOUND_RUST_CRATES — the surface is still pinned so the checker
     /// does not invent names).
     const FLATE2_WRITER: &[&str] = &["write", "finish"];
-    /// Scalar atomics (`atomic.int64` and friends) — the predeclared Go type's
-    /// own methods. `compare_and_swap` is the Hybrid spelling of
-    /// `CompareAndSwap`.
-    const ATOMIC_SCALAR: &[&str] = &["load", "store", "add", "swap", "compare_and_swap"];
     /// `sync.Mutex` — the predeclared Go type's own methods. Hybrid spells
     /// them lowercased; `sync.mutex` resolves to `ForeignOpaque`, which made
     /// `s.mu.totally_fake()` pass `hyb check` and die in `go build` with
@@ -382,7 +380,25 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
         // here would break legal element code — view stays fail-open.
         "serde_json.value" => Some(SERDE_JSON_VALUE),
         "flate2.writer" => Some(FLATE2_WRITER),
-        _ if recv_type == "atomic.int" || is_scalar_atomic(recv_type) => Some(ATOMIC_SCALAR),
+        // NOTE: atomics are deliberately NOT gated here, and this is a
+        // deliberate regression-free choice, not an oversight.
+        //
+        // `receiver_type_name` collapses every `TypeShape::Atomic` to the single
+        // key `"atomic.int"` (shape.rs) — the shape carries no element type, so
+        // the checker cannot tell `atomic.bool` from `atomic.int64`. Their Go
+        // surfaces genuinely differ: `Bool` has {Load, Store, Swap,
+        // CompareAndSwap} while the integer atomics add {Add, And, Or}. No
+        // single list is correct for both:
+        //   * the union blesses `atomic.Bool.Add`, which Go lacks (#2200's own
+        //     bug class, left open), and
+        //   * the intersection rejects `atomic.Int64.And`/`Or`, which Go has
+        //     since 1.23 and which `go build` accepts (a NEW false rejection).
+        //
+        // Pinning this correctly needs `TypeShape::Atomic` to carry its element
+        // type — a change to the shape model, not to this table — so atomics
+        // keep their existing fail-open behaviour here and are tracked
+        // separately. This keeps the #2200 fix to the handles whose surface is
+        // actually knowable.
         _ => None,
     }
 }
