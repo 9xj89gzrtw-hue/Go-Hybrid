@@ -362,7 +362,17 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     /// own methods. `compare_and_swap` is the Hybrid spelling of
     /// `CompareAndSwap`.
     const ATOMIC_SCALAR: &[&str] = &["load", "store", "add", "swap", "compare_and_swap"];
+    /// `sync.Mutex` — the predeclared Go type's own methods. Hybrid spells
+    /// them lowercased; `sync.mutex` resolves to `ForeignOpaque`, which made
+    /// `s.mu.totally_fake()` pass `hyb check` and die in `go build` with
+    /// `type "sync".Mutex has no field or method totally_fake`. Same bug
+    /// class as #2200, different handle.
+    const SYNC_MUTEX: &[&str] = &["lock", "unlock", "try_lock"];
+    /// `sync.RWMutex`.
+    const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     match recv_type {
+        "sync.mutex" => Some(SYNC_MUTEX),
+        "sync.rwmutex" => Some(SYNC_RWMUTEX),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result

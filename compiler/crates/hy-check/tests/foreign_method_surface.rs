@@ -148,3 +148,83 @@ fn view_shape_stays_fail_open() {
         r.diagnostics
     );
 }
+
+// --- same bug class, different handle: sync.Mutex / sync.RWMutex ---------
+//
+// `sync.mutex` resolves to `ForeignOpaque("sync.mutex")`, and because the
+// method tables were fail-open, `s.mu.totally_fake()` passed `hyb check` and
+// then died in the toolchain:
+//
+//     s.mu.totally_fake undefined (type "sync".Mutex has no field or method totally_fake)
+//
+// These pin both directions: the phantom name rejects, the real Go surface
+// (Lock/Unlock/TryLock, and the RW quartet) still accepts.
+
+#[test]
+fn phantom_sync_mutex_method_is_rejected() {
+    let r = check(
+        "struct stats {\n\
+             mu sync.mutex\n\
+             n int\n\
+         }\n\
+         fn main() {\n\
+             var s stats\n\
+             s.mu.totally_fake()\n\
+             fmt.println(\"n={s.n}\")\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "got {:?}", r.diagnostics);
+    let msg = &r.diagnostics[0].message;
+    assert!(msg.contains("totally_fake"), "message: {msg}");
+    assert!(msg.contains("sync.mutex"), "message: {msg}");
+}
+
+#[test]
+fn real_sync_mutex_methods_still_accept() {
+    let r = check(
+        "struct stats {\n\
+             mu sync.mutex\n\
+             n int\n\
+         }\n\
+         fn main() {\n\
+             var s stats\n\
+             s.mu.lock()\n\
+             s.n = 5\n\
+             s.mu.unlock()\n\
+             fmt.println(\"n={s.n}\")\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Accept, "got {:?}", r.diagnostics);
+}
+
+#[test]
+fn phantom_sync_rwmutex_method_is_rejected_but_real_ones_accept() {
+    let bad = check(
+        "struct stats {\n\
+             rw sync.rwmutex\n\
+             n int\n\
+         }\n\
+         fn main() {\n\
+             var s stats\n\
+             s.rw.totally_fake()\n\
+             fmt.println(\"n={s.n}\")\n\
+         }\n",
+    );
+    assert_eq!(bad.verdict, Verdict::Reject, "got {:?}", bad.diagnostics);
+
+    let good = check(
+        "struct stats {\n\
+             rw sync.rwmutex\n\
+             n int\n\
+         }\n\
+         fn main() {\n\
+             var s stats\n\
+             s.rw.rlock()\n\
+             v := s.n\n\
+             s.rw.runlock()\n\
+             fmt.println(\"v={v}\")\n\
+         }\n",
+    );
+    assert_eq!(good.verdict, Verdict::Accept, "got {:?}", good.diagnostics);
+}
+
