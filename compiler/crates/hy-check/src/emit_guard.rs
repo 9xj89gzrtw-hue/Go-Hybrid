@@ -1164,6 +1164,12 @@ impl<'a> Checker<'a> {
                 len,
             );
         }
+        // #2102: an invalid builtin call inside an array length (`[len(1)]int`,
+        // `[cap(1)+1]int`, `[len()]int`) is the same Go build error as in a
+        // value position. `check_type_ref_array_lens` already walks every
+        // TypeRef, so running the builtin-argument check here covers struct
+        // fields, aliases, local annotations, literals and conversions.
+        self.check_expr_builtin_args(len);
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {
