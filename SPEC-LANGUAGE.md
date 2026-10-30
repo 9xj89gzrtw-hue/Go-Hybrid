@@ -1632,6 +1632,24 @@ mux.handle("/x", http.handler(fn(w http.response_writer) {
   tagged open (D17): it is exactly the ergonomics question the adversarial
   corpus's idiomatic-pattern cases and the repeated-rejection tripwire
   (§9.7) exist to answer.
+- **O5.6 — Returned `const`s are traced interprocedurally; an untraceable
+  callee fails closed (issue #2320).** O5.1's exclusivity proof follows a
+  call's `return` positions, so a `const` that flows back through a chain of
+  wrappers is still the `const` storage: moving such a value is `HYB-E3004`
+  and writing through it is `HYB-E3006` (T22), exactly as for the direct
+  call. Two boundaries are **fail-closed** (rule FC, O4.9) rather than
+  silent: a chain deeper than the checker's interprocedural walk bound, and
+  a callee whose body this file cannot see — a function value held in a
+  binding (`cb := leaf; m := cb()`), a computed callee, or a struct field
+  holding a function. Past either boundary the checker reports **every**
+  may-share file-level `const` as a possible return root, so such a value is
+  never moved or mutated as if it were freshly allocated. The report is limited
+  to results that may **share** (or whose shape did not resolve): a result the
+  checker types as a plain value — a chain returning `int`, say — cannot alias
+  a `const` and keeps its previous verdict. The price is a
+  rejection, never silence. A call into another package or a builtin is
+  excluded deliberately: `const`s are file-level, so another file's function
+  cannot return one of ours, and builtins return fresh values.
 
 ```hy
 counter := map[string]int{}

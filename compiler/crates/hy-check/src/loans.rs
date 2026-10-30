@@ -4268,6 +4268,14 @@ impl<'a> Checker<'a> {
     /// shape `shape_may_share` is true) that a call inside `value` may return
     /// (directly, via local aliases/projections/literals, or via named results
     /// on bare `return`).
+    ///
+    /// Fails closed (issue #2320): a chain of calls deeper than
+    /// `CALLEE_CONST_RETURN_WALK_LIMIT` and a callee whose body this file
+    /// cannot see (a function value in a binding, a computed callee) report
+    /// every may-share file-level `const` instead of assuming a fresh result.
+    /// The report only covers results that may share (or whose shape did not
+    /// resolve): a result the checker types as a plain value cannot alias a
+    /// `const`, so it keeps the pre-#2320 verdict.
     pub(crate) fn collect_callee_const_return_roots(
         &self,
         st: &FnState,
@@ -4275,7 +4283,112 @@ impl<'a> Checker<'a> {
         out: &mut Vec<String>,
         depth: usize,
     ) {
-        if depth > 4 {
+        let mut walked: HashMap<String, Option<Vec<String>>> = HashMap::new();
+        self.walk_callee_const_return_roots(st, value, out, depth, &mut walked);
+    }
+
+    /// Depth bound for the interprocedural walk in
+    /// `collect_callee_const_return_roots`. Chains deeper than this are not
+    /// traced: past the bound the walk reports every may-share file-level
+    /// `const` instead of assuming the call result is fresh (SPEC O4.9). The
+    /// visited-set below keeps one walk linear in the number of callee bodies,
+    /// so the bound is a safety net against pathological inputs, not a cost
+    /// limit (#2320).
+    const CALLEE_CONST_RETURN_WALK_LIMIT: usize = 32;
+
+    /// Is a fail-closed report warranted for `value`? SPEC O4.9 is about the
+    /// share, not about the name: only a result that may share mutable GC
+    /// storage (or whose shape did not resolve) can hand a file-level `const`
+    /// back, so an expression the checker types as a plain value — a deep
+    /// chain of `int`-returning wrappers, say — keeps its report off. The
+    /// shape is only trusted where it did resolve; an unresolved shape stays
+    /// fail-closed through the `Unknown` arm.
+    fn fail_closed_for(&self, st: &FnState, value: &Expr) -> bool {
+        let shape = self.shape_of_expr(st, unwrap_parens(value));
+        self.shape_may_share(&shape) || matches!(shape, TypeShape::Unknown)
+    }
+
+    /// Fail closed (SPEC O4.9, GUARANTEES row 4): every file-level `const`
+    /// whose shape may share is a possible value of an expression whose callee
+    /// this file cannot trace. Callers intersect these names with their own
+    /// roots, so reporting a superset is always safe.
+    fn push_may_share_const_roots(&self, out: &mut Vec<String>) {
+        for (name, cb) in &self.consts {
+            if self.shape_may_share(&cb.shape) && !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+    }
+
+    /// A callee whose body this file cannot see, but which may still return a
+    /// file-level `const` of this file (SPEC O4.9 — fail closed):
+    ///
+    /// * a function value held in a local binding or file-level `const`
+    ///   (`cb := leaf; m := cb()`), or a closure binding `st.closure_fnlits`
+    ///   does not know;
+    /// * a computed callee (`fns[i]()`, `pick()()`);
+    /// * a field call on a value of a struct this file declares, when the name
+    ///   is not a declared method: a func-typed struct field (`holder.cb()`) or
+    ///   a method we could not attribute to one receiver (ambiguous shape).
+    ///
+    /// Deliberately NOT included: a call into another package (`pkg.Fn()`) and
+    /// an unresolvable bare name (`make`, `append`, an undefined function).
+    /// `const`s are file-level, so another file's function cannot hand one of
+    /// ours back, and the builtins return fresh values.
+    fn callee_returns_unseen_shared_const(&self, st: &FnState, callee: &Expr) -> bool {
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
+            Expr::Field {
+                base,
+                name: method,
+                ..
+            } => {
+                if matches!(unwrap_parens(base), Expr::Ident { name: pkg, .. }
+                    if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg))
+                {
+                    return false;
+                }
+                let head = Self::base_named_type_str(method);
+                if self.method_decls.keys().any(|(_, m)| m == head) {
+                    return true;
+                }
+                // A field of a struct declared in this file may hold a function
+                // value (`holder.cb()`), whose target we cannot see.
+                match self.shape_of_expr(st, base) {
+                    TypeShape::Struct(Some(s)) => self.structs.contains_key(&s),
+                    TypeShape::Pointer(inner) => {
+                        matches!(*inner, TypeShape::Struct(Some(ref s)) if self.structs.contains_key(s))
+                    }
+                    _ => false,
+                }
+            }
+            Expr::Index { .. } | Expr::Call { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// The walk behind `collect_callee_const_return_roots`.
+    ///
+    /// `walked` keys a callee by the address of its body block (`None` while
+    /// that body is on the walk, `Some(roots)` once its contribution is known).
+    /// Within one query a callee contributes the same roots no matter which
+    /// call site asked for it, so a repeat visit replays the first one — that is
+    /// what keeps a diamond-shaped call graph linear instead of exponential in
+    /// the depth bound. A body that is already on the walk (recursion) is
+    /// reported fail-closed: its own `return`s are being handled by the outer
+    /// walk, and re-entering it would loop.
+    fn walk_callee_const_return_roots(
+        &self,
+        st: &FnState,
+        value: &Expr,
+        out: &mut Vec<String>,
+        depth: usize,
+        walked: &mut HashMap<String, Option<Vec<String>>>,
+    ) {
+        if depth > Self::CALLEE_CONST_RETURN_WALK_LIMIT {
+            if self.fail_closed_for(st, value) {
+                self.push_may_share_const_roots(out);
+            }
             return;
         }
         match unwrap_parens(value) {
@@ -4290,34 +4403,66 @@ impl<'a> Checker<'a> {
                 operand,
                 ..
             } => {
-                self.collect_callee_const_return_roots(st, operand, out, depth);
+                self.walk_callee_const_return_roots(st, operand, out, depth, walked);
             }
             Expr::StructLit { fields, .. } => {
                 for f in fields {
-                    self.collect_callee_const_return_roots(st, &f.value, out, depth);
+                    self.walk_callee_const_return_roots(st, &f.value, out, depth, walked);
                 }
             }
             Expr::MapLit { entries, .. } => {
                 for (k, v) in entries {
-                    self.collect_callee_const_return_roots(st, k, out, depth);
-                    self.collect_callee_const_return_roots(st, v, out, depth);
+                    self.walk_callee_const_return_roots(st, k, out, depth, walked);
+                    self.walk_callee_const_return_roots(st, v, out, depth, walked);
                 }
             }
             Expr::SliceLit { items, .. } => {
                 for it in items {
-                    self.collect_callee_const_return_roots(st, it, out, depth);
+                    self.walk_callee_const_return_roots(st, it, out, depth, walked);
                 }
             }
             Expr::Call { callee, args, .. } => {
                 for a in args {
-                    self.collect_callee_const_return_roots(st, &a.value, out, depth);
+                    self.walk_callee_const_return_roots(st, &a.value, out, depth, walked);
                 }
-                self.collect_callee_const_return_roots(st, callee, out, depth);
+                self.walk_callee_const_return_roots(st, callee, out, depth, walked);
                 let Some((typed_params, typed_results, body)) =
                     self.resolve_call_expr_decl_or_fnlit(st, callee)
                 else {
+                    // The callee's declaration is not visible here; if the
+                    // value it is called through may still be one of our
+                    // file-level `const`s, report them all instead of treating
+                    // the call result as fresh (SPEC O4.9, issue #2320).
+                    if self.callee_returns_unseen_shared_const(st, callee)
+                        && self.fail_closed_for(st, value)
+                    {
+                        self.push_may_share_const_roots(out);
+                    }
                     return;
                 };
+                let key = format!("{:p}", body as *const Block);
+                match walked.get(&key) {
+                    Some(Some(roots)) => {
+                        for r in roots {
+                            if !out.contains(r) {
+                                out.push(r.clone());
+                            }
+                        }
+                        return;
+                    }
+                    Some(None) => {
+                        // A body already on the walk: its own returns are
+                        // handled by the outer walk, and re-entering it would
+                        // loop. Report fail-closed where a share is possible.
+                        if self.fail_closed_for(st, value) {
+                            self.push_may_share_const_roots(out);
+                        }
+                        return;
+                    }
+                    None => {}
+                }
+                walked.insert(key.clone(), None);
+                let mark = out.len();
                 let mut shadowed: HashSet<String> =
                     typed_params.iter().map(|(n, _)| n.clone()).collect();
                 shadowed.extend(
@@ -4349,11 +4494,12 @@ impl<'a> Checker<'a> {
                 let expr_const_origins =
                     |e: &Expr,
                      aliases: &HashMap<String, HashSet<String>>,
-                     shadowed: &HashSet<String>|
+                     shadowed: &HashSet<String>,
+                     walked: &mut HashMap<String, Option<Vec<String>>>|
                      -> HashSet<String> {
                         let mut roots = Vec::new();
                         collect_ref_roots(e, &mut roots);
-                        self.collect_callee_const_return_roots(st, e, &mut roots, depth + 1);
+                        self.walk_callee_const_return_roots(st, e, &mut roots, depth + 1, walked);
                         let mut set = HashSet::new();
                         for r in roots {
                             if let Some(cs) = aliases.get(&r) {
@@ -4378,7 +4524,8 @@ impl<'a> Checker<'a> {
                                     shadowed.insert(n.clone());
                                 }
                             } else if l.values.len() == 1 && l.names.len() > 1 {
-                                let cs = expr_const_origins(&l.values[0], &aliases, &shadowed);
+                                let cs =
+                                    expr_const_origins(&l.values[0], &aliases, &shadowed, walked);
                                 for n in &l.names {
                                     if cs.is_empty() {
                                         aliases.remove(n);
@@ -4390,7 +4537,7 @@ impl<'a> Checker<'a> {
                                 }
                             } else {
                                 for (n, v) in l.names.iter().zip(l.values.iter()) {
-                                    let cs = expr_const_origins(v, &aliases, &shadowed);
+                                    let cs = expr_const_origins(v, &aliases, &shadowed, walked);
                                     if cs.is_empty() {
                                         aliases.remove(n);
                                         shadowed.insert(n.clone());
@@ -4405,10 +4552,11 @@ impl<'a> Checker<'a> {
                             targets, values, ..
                         } => {
                             if targets.len() == values.len() {
-                                let rhs_cs: Vec<HashSet<String>> = values
-                                    .iter()
-                                    .map(|v| expr_const_origins(v, &aliases, &shadowed))
-                                    .collect();
+                                let mut rhs_cs: Vec<HashSet<String>> =
+                                    Vec::with_capacity(values.len());
+                                for v in values {
+                                    rhs_cs.push(expr_const_origins(v, &aliases, &shadowed, walked));
+                                }
                                 for (t, cs) in targets.iter().zip(rhs_cs) {
                                     match &t.kind {
                                         PlaceKind::Ident(n) => {
@@ -4433,7 +4581,8 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             } else if values.len() == 1 && targets.len() > 1 {
-                                let cs = expr_const_origins(&values[0], &aliases, &shadowed);
+                                let cs =
+                                    expr_const_origins(&values[0], &aliases, &shadowed, walked);
                                 for t in targets {
                                     if let PlaceKind::Ident(n) = &t.kind {
                                         if cs.is_empty() {
@@ -4463,7 +4612,7 @@ impl<'a> Checker<'a> {
                                 }
                             } else {
                                 for v in values {
-                                    for c in expr_const_origins(v, &aliases, &shadowed) {
+                                    for c in expr_const_origins(v, &aliases, &shadowed, walked) {
                                         if !out.contains(&c) {
                                             out.push(c);
                                         }
@@ -4474,6 +4623,8 @@ impl<'a> Checker<'a> {
                         _ => {}
                     }
                 }
+                // The roots this callee contributed, for the replay path above.
+                walked.insert(key, Some(out[mark..].to_vec()));
             }
             _ => {}
         }
