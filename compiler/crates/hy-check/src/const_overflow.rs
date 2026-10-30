@@ -1578,3 +1578,49 @@ mod unit {
         assert_eq!(target_uint_range(), (0, u64::MAX as i128));
     }
 }
+
+#[cfg(test)]
+mod map_lit_duplicate_tests {
+    use crate::{check_file, Verdict};
+    use hy_syntax::parse_file;
+
+    fn check(src: &str) -> crate::CheckResult {
+        let ast = parse_file("test.hy", src).expect("test snippet must parse");
+        check_file(&ast)
+    }
+
+    #[test]
+    fn map_lit_duplicate_constant_keys_rejected() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"a\": 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\" + \"b\": 1, \"ab\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, true: 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[int]int{1 + 1: 0, 2: 0}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E1002" && d.message.contains("duplicate key")),
+                "expected HYB-E1002 duplicate key diagnostic, got {:?} for:\n{src}",
+                r.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn map_lit_distinct_constant_keys_accepted() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"b\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, false: 2}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{src}");
+        }
+    }
+}
