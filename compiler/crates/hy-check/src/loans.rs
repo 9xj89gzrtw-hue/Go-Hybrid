@@ -7252,6 +7252,7 @@ impl<'a> Checker<'a> {
         aliases: &HashSet<String>,
         depth: usize,
     ) -> bool {
+        if walk::addr_of_index_base_path(e).is_some_and(|p| aliases.contains(path_root(&p))) { return true; }
         match e {
             Expr::FnLit {
                 params,
