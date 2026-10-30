@@ -843,3 +843,13 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - WRITTEN REPLIES: all seven PRs got landing replies with battery evidence + bounty rail (discussion #295). No silent closes.
 - Suite trajectory: 168 -> 171 this session (24 -> 31 landings across sessions 19-21 today). Final main 0634a44, ls-remote == HEAD, push-500 retry pattern armed (not needed).
 - NEXT TICK QUEUE (active authors, from scan): #2002 (Dimany4, channel directions + SPEC-LANGUAGE note now added), airdropia W-016 series #2149 (escape_sites.py) -> #2195 (M2 spec) -> #2196 (M3 checker) — land in that order, they build on each other; #2126 (Sarbajit-Sengupta, Kaggle job publication). CI: 210 approve-eligible remain (40 approved this session).
+
+## Session 22 — 2026-10-31 early (tick 487193: 3 landed, W-016 arc gated on a real tool bug)
+
+- Sandbox recycled again; toolchains re-restored (rust 1.99.0 + go1.26.9), warm build 15s. CI approve 40/252.
+- LANDED: #2002 d73208d (Dimany4, composite receive channel directions, fixes #1347 — operand-level send/recv symmetry + SPEC C3 note; 172 suites) · #2149 ceb2454 (airdropia, W-016 M1 escape_sites.py + kill criteria) · #2126 80a6a7a (Sarbajit-Sengupta, atomic summary.json promotion in kaggle_fetch — 863-line raw diff is line-endings; -w semantic delta 19 lines + 14 tests; full battery still run per doctrine).
+- GATE FIND (important): #2149's own docstring kill criteria FAIL on the merged tree — program 10 yields 0 triples (criteria: exactly 1), exit 1. Root cause: string-blind brace matcher; the `{` in the interpolation string "pong {hits}" never closes, body_depth never returns to 0, closure skipped. Landed #2149's battery never executed the tool's docstring criteria — RULE ADDED: tools PRs with measurable docstring criteria get those criteria executed at verification.
+- #2195 (W-016 M2 spec flip: A5 lint -> fourth check-site) NOT LANDED — its logged census ("exactly 1 triple, program 10") is unreproducible with the current M1 tool; evidence reply posted with root cause + fix direction (string-aware scanning). #2196 (M3 HYB-E3013) queued behind the M1 fix. Author invited: fix-up PR -> I land M1-fix + M2 + M3 in one pass.
+- WRITTEN REPLIES: #2002 landing, #2149 landing + post-landing disclosure, #2126 landing, #2195 gate evidence. No silent anything.
+- Battery on every landing: 172 suites ok, corpus tripwire not fired, differential FULL 41/41 + 86/86; #2126 additionally py_compile + 4 unittest suites + census.
+- Suite trajectory: 171 -> 172. Final main 80a6a7a, ls-remote == HEAD.
