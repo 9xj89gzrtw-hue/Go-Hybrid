@@ -136,6 +136,22 @@ impl<'a> Checker<'a> {
     }
 
     fn non_integer_bound_kind(&self, st: &FnState, expr: &Expr) -> Option<String> {
+        self.non_integer_bound_kind_at(st, expr, 0)
+    }
+
+    /// Issue #1554: file `const` initializers can be compound expressions
+    /// (`const hi = 1.5 + 0.5`, `const flag = !false`). Resolve them through
+    /// the same classifier instead of only classifying bare literals; the
+    /// depth cap keeps a `const a = b; const b = a` cycle finite.
+    fn non_integer_bound_kind_at(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        depth: usize,
+    ) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
         match unwrap_parens(expr) {
             Expr::Lit {
                 kind: LitKind::Float(_),
@@ -164,7 +180,7 @@ impl<'a> Checker<'a> {
                 if matches!(op, hy_syntax::UnOp::Not) {
                     return Some("bool".to_string());
                 }
-                if let Some(k) = self.non_integer_bound_kind(st, operand) {
+                if let Some(k) = self.non_integer_bound_kind_at(st, operand, depth + 1) {
                     return Some(k);
                 }
             }
@@ -185,8 +201,8 @@ impl<'a> Checker<'a> {
                     return Some("bool".to_string());
                 }
                 if let Some(k) = self
-                    .non_integer_bound_kind(st, lhs)
-                    .or_else(|| self.non_integer_bound_kind(st, rhs))
+                    .non_integer_bound_kind_at(st, lhs, depth + 1)
+                    .or_else(|| self.non_integer_bound_kind_at(st, rhs, depth + 1))
                 {
                     return Some(k);
                 }
@@ -224,24 +240,8 @@ impl<'a> Checker<'a> {
         if let Expr::Ident { name, .. } = unwrap_parens(expr) {
             if st.env_lookup(name).is_none() {
                 if let Some(init) = self.const_values.get(name.as_str()) {
-                    match unwrap_parens(init) {
-                        Expr::Lit {
-                            kind: LitKind::Float(_),
-                            ..
-                        } => return Some("float".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Bool(_),
-                            ..
-                        } => return Some("bool".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Str(_) | LitKind::RawStr(_),
-                            ..
-                        } => return Some("string".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Nil,
-                            ..
-                        } => return Some("nil".to_string()),
-                        _ => {}
+                    if let Some(k) = self.non_integer_bound_kind_at(st, init, depth + 1) {
+                        return Some(k);
                     }
                 }
             }
