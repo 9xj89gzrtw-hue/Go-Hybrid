@@ -32,7 +32,7 @@ class SummaryIdentityTests(unittest.TestCase):
             # the fetched bytes for diagnosis.
             def offline_download(command, **kwargs):
                 staging = next((root / "result/raw").glob(".staging-*"))
-                (staging / "summary.json").write_text(payload, encoding="utf-8")
+                (staging / "summary.json").write_bytes(payload.encode("utf-8"))
                 return 0, "offline successful transfer"
 
             with mock.patch.object(job, "sh", side_effect=offline_download), \

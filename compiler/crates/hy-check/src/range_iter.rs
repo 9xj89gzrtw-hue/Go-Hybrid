@@ -48,7 +48,7 @@ impl<'a> Checker<'a> {
                         shape,
                         TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
                     );
-                    if vars.len() > 1 && (is_chan || is_set) {
+                    if vars.len() > 1 && (is_chan || is_set || shape.is_handle()) {
                         let kind_str = if is_chan { "channel" } else { "set" };
                         let why_note = if is_chan {
                             "why: Go permits only a single iteration variable when ranging over a channel (`range over … permits only one iteration variable`), so an accepted Hybrid program would emit unbuildable Go (LX13)".to_string()
@@ -270,10 +270,18 @@ impl<'a> Checker<'a> {
     ) {
         let tl = self.typed_int_bound(st, lo);
         let th = self.typed_int_bound(st, hi);
-        let mismatch = match (&tl, &th) {
+        // Issue #1165: compare the two bounds as *Go types*, not as spellings.
+        // `byte` and `rune` are Go aliases of `uint8`/`int32`, and `u8`/`i32`
+        // are the SPEC spellings the emitter maps onto those same Go types, so
+        // `var a u8 = 0; var b uint8 = 10; for i in a..b` is a legal loop that
+        // was rejected with a false HYB-E2009. Canonicalise before comparing;
+        // the diagnostic still prints the spellings the author wrote.
+        let tl_c = tl.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        let th_c = th.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        let mismatch = match (&tl_c, &th_c) {
             (Some(a), Some(b)) => a != b,
-            (None, Some(b)) => b != "int",
-            (Some(a), None) => inclusive && a != "int",
+            (None, Some(b)) => *b != "int",
+            (Some(a), None) => inclusive && *a != "int",
             (None, None) => false,
         };
         if mismatch {
@@ -392,10 +400,10 @@ impl<'a> Checker<'a> {
         // only pointer-to-ARRAY is rangeable (`*struct` / `*slice` /
         // `*string` are not), so normalize exactly one Pointer level for
         // arrays and leave every other shape as classified.
-        let shape = match self.shape_of_expr(st, expr) {
+        let shape = if matches!(self.ty_of_expr(st, expr).map(|t| self.resolve_type_alias(&t)), Some(TypeExpr::Option { .. })) { TypeShape::Struct(None) } else { match self.shape_of_expr(st, expr) {
             TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
             other => other,
-        };
+        } };
         match shape {
             TypeShape::Slice(_)
             | TypeShape::Array(_)

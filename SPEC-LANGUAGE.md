@@ -316,6 +316,17 @@ index/element for slices/arrays/strings, key/value for maps; `for v in ch`
 yields received values. Two-variable channel receive is the comma-ok
 clause inside `select` (`v, ok := <-sq:`).
 
+Integer range bounds are compared by their *emitted Go integer type*, not by
+the spelling the author used. The SPEC spellings (`u8`, `i16`, `u32`, …) and
+the Go builtins `byte` and `rune` denote the same types Go gives them
+(`uint8`, `int16`, `uint32`, `int32`, …), so a range whose two bounds are
+spelled differently but resolve to one Go type is legal: `for i in a..b` with
+`a u8` and `b uint8` is accepted. Spellings that Go keeps distinct stay
+distinct — `int`/`int64` and `uint`/`uintptr` never collapse, and the
+`usize`/`isize` names are undefined by SPEC-LANGUAGE (§402) and are left
+untouched. Untyped-bound defaulting and the constant-overflow checks are
+unchanged. (Issue #1165.)
+
 **LX13a — the iterable is TYPE-checked (HYB-E2009/E3005).** LX13's iterable
 set is a closed contract: since issue #411, the checker rejects `for x in e`
 when `e` resolves to a concrete non-iterable shape (an int, bool, struct, a
