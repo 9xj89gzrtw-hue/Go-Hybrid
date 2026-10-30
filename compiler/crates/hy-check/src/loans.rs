@@ -5956,7 +5956,21 @@ impl<'a> Checker<'a> {
                 if let Some(idx) = origin.find("`const ") {
                     let rest = &origin[idx + 7..];
                     if let Some(end) = rest.find('`') {
-                        return Some(rest[..end].to_string());
+                        let const_name = &rest[..end];
+                        // A copy of a scalar (or otherwise immutable-by-value) const is a
+                        // value copy, not a write-through alias: `const k = 3; x = k; x = 1`
+                        // must stay writable. Only consts that can share backing storage
+                        // (#123: map/slice/pointer/handle/struct-or-array containing them)
+                        // make a write through the copy a write to the const.
+                        if let Some(cb) = self.lookup_binding(st, const_name) {
+                            if matches!(
+                                cb.shape,
+                                TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic
+                            ) {
+                                return None;
+                            }
+                        }
+                        return Some(const_name.to_string());
                     }
                 }
             }
