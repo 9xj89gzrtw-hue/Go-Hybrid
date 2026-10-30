@@ -802,3 +802,20 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - CI: 40 more action_required runs approved (287 -> 247 pending).
 - Suite growth this tick: 152 -> 163, all green; differential FULL agreement on every landing; final main 9bc9de8 (ls-remote == HEAD).
 - GitHub side-note: transient "Internal Server Error" on pushes (3 of 12 hit it); retry-after-40s pattern added to the landing loop.
+
+## Session 20 — 2026-10-30 (owner directive: retire the sweeper, review the actively-replying first)
+
+- SWEEPER RETIRED (owner doctrine change): queue-sweeper.yml lost its schedule trigger (manual dispatch only, dry-run preserved) — 5435169. Closes are a deliberate act again; no-silent-closes is unconditional. CONTRIBUTING.md rule 5 (queue self-drain, added by #2246) removed in the follow-up to its own landing.
+- REOPENED the 7 sweeper-close victims whose authors replied after the close: #1645 #1515* #1516* #1518 #1598 #1524 #1505 (*#1515/#1516: GitHub 422 on reopen — head repos exist but GitHub refuses; written explanation + re-push/cherry-pick recovery path posted on both). The other ~38 swept PRs stay closed unless their authors come back (reopen path was in every sweep reply).
+- LANDED (7 merges, each: diff read -> battery -> credit merge -> push assert -> written reply):
+  #2329 (Dimany4, fixes #2320) const-return walk: visited-set to 32, fail-closed past bound + unseen callees — 060dcc5, 164 suites (5 tests fail pre-fix). STRONGEST-TAKE call vs #2330 (Dimank92, depth-bump variant): courtesy verdict posted on #2330 with delta-rebase offer.
+  #2343 (james-kkc, fixes #1617) hyb build full arg validation + --deny-managed — 8dae0dc, 165 suites.
+  #2278 (Dimank92, closes #2271) resolve.rs rewrite: lexical blocks, := RHS before binding, undeclared field base + self-ref := reject E1001 — 986f9ba, 166 suites, differential FULL across the rewrite.
+  #2256 (airdropia, fixes #2253) conflict-marker gate covers .s/.S bridge assembly — f8b3b68.
+  #2246 (airdropia, fixes #726) bare-error result is the error slot, not a value temp — c40a823 (+follow-up: rule-5 removal).
+  #2248 (airdropia, fixes #884) set[T] prelude shares its backing map (O5.2/O5.4/T22 bypass closed) — 45fa4a9, 167 suites.
+  #2249 (airdropia, fixes #887) send values + spawn args single-value positions — 224c082, 168 suites.
+  #2255 (airdropia, fixes #1850) unary operand single-value position — e1da4a0, 169 suites. (airdropia batch: 5/5 landed.)
+- Sandbox recycled AGAIN between turns (rustup/go/target all gone; target partially persisted). Toolchains restored, warm-cache baseline re-verified 163 green before any landing. verify_pr.sh CARGO_BUILD_JOBS=1 carried over.
+- WRITTEN REPLIES (no silent closes): bounty-rail confirmations #2301 (ocakciomursel-pixel, landed d5c41fb) and #2339 (dextermos-dev, merged 12:23Z, coordinates -> discussion #295); holding replies #2265 #2268 (queue position + rebase ask); factual dup verdicts #2263/#2266/#2264 (underlying issues fixed by landed #1903/#2228/#2230 — rebase + delta case invited, stays open).
+- Suite growth: 163 -> 169 this session (24 landings across sessions 19-20 today); final main e1da4a0 (ls-remote == HEAD).
