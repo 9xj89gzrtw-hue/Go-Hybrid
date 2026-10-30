@@ -199,11 +199,79 @@ pub fn emit_go_package(
 /// call prefix — the emitter only emits `<root>.` for KNOWN crates, so the
 /// scan is exact, never heuristic.
 pub fn used_binding_roots(go_src: &str) -> Vec<&'static str> {
+    // Issue #1616: a plain-Go string (`"jsonbinding.Parse"`) is user data,
+    // not a call. Mask literals and comments before the substring scan so
+    // only code positions can select the Rust/cgo bridge.
+    let code = mask_go_noncode(go_src);
     shapes::RUST_CRATES
         .iter()
-        .filter(|c| go_src.contains(&format!("{}.", c.binding_root)))
+        .filter(|c| code.contains(&format!("{}.", c.binding_root)))
         .map(|c| c.binding_root)
         .collect()
+}
+
+/// Replace Go string/rune literals and comments with blanks, preserving
+/// newlines. Not a parser: just enough to keep data out of identifier scans.
+fn mask_go_noncode(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                out.push(' ');
+                while let Some(n) = chars.next() {
+                    if n == '\\' {
+                        chars.next();
+                        out.push(' ');
+                    } else if n == c {
+                        break;
+                    } else if n == '\n' {
+                        // Unterminated (invalid Go) — keep scanning sanely.
+                        out.push('\n');
+                        break;
+                    } else {
+                        out.push(' ');
+                    }
+                }
+                out.push(' ');
+            }
+            '`' => {
+                out.push(' ');
+                while let Some(n) = chars.next() {
+                    if n == '`' {
+                        break;
+                    }
+                    out.push(if n == '\n' { '\n' } else { ' ' });
+                }
+                out.push(' ');
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                out.push(' ');
+                while let Some(n) = chars.next() {
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                out.push(' ');
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    if n == '\n' {
+                        out.push('\n');
+                    }
+                    prev = n;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
