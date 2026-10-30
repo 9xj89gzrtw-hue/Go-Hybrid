@@ -261,6 +261,13 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
         (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
 
+        // Pointer targets and arguments: Go only converts between pointers.
+        // A pointer cannot convert to or from any non-pointer type; the one
+        // exception is an interface target (`any(p)`), handled above.
+        (Pointer(_), Pointer(_)) => false,
+        (Pointer(_), Interface) => false,
+        (Pointer(_), _) | (_, Pointer(_)) => true,
+
         _ => false,
     }
 }
