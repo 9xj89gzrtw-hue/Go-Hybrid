@@ -1018,6 +1018,10 @@ impl<'a> Collector<'a> {
             Stmt::Expr { expr, .. } => self.expr(expr),
             Stmt::Send { chan, value, .. } => {
                 self.expr(chan);
+                // #887: the sent value is a single-value position. A void call
+                // or a multi-value call here passed the checker and emitted
+                // `ch <- noop()` / `ch <- pair()`, which Go rejects.
+                self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
             }
             Stmt::If {
@@ -1084,6 +1088,12 @@ impl<'a> Collector<'a> {
             Stmt::Task { callee, args, span } => {
                 self.expr(callee);
                 for a in args {
+                    // #887: a spawn argument sits in a single-value position
+                    // exactly like a call argument does. Without this,
+                    // `task worker(noop())` (void call) and
+                    // `task worker(pair())` (two values) passed the checker
+                    // and emitted Go that cannot build.
+                    self.check_single_value_position(&a.value, "a spawn argument", false);
                     self.expr(&a.value);
                 }
                 match unwrap_parens(callee) {
@@ -1166,6 +1176,9 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
+                    // #887: a channel send in a select arm is also a single-value
+                    // position.
+                    self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
                         }
