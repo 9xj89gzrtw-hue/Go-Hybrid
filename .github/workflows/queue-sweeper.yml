@@ -13,7 +13,7 @@ on:
       dry:
         description: "Dry run only (list what would close)"
         type: boolean
-        default: false
+        default: true
       min_age:
         description: "Min PR age in days before closing (default 5)"
         required: false
