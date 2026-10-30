@@ -782,3 +782,23 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - CI: 80 action_required runs approved (2x40); ~312 remain for the cron ticks. Sweeper healthy (daily success, #787 protected per policy — queue is the live 5-day window at ~65 arrivals/day).
 - Suite growth this session: 136 -> 149 suites, all green; differential FULL agreement on every landing; final main b62d1a2 verified (ls-remote == HEAD).
 - Cron: arena watcher (478193) retired per owner instruction; new "Go-Hybrid PR queue drain — verify & land (2hrly)" (486809) fires 2026-10-30 14:20 +03, same doctrine encoded in the prompt.
+
+## Session 19 — 2026-10-30 (cron tick 487193, "queue drain" cadence)
+
+- Sandbox recycled again: reinstalled rustup 1.99.0 + go1.26.9. First two background builds died silently; found cgroup memory.peak == 3.0GiB — the 2-job cargo build OOMs next to the sandbox's own services. verify_pr.sh switched to CARGO_BUILD_JOBS=1 / GOFLAGS=-p=1 / -j1; builds now run in the foreground with 560s incremental slices. Baseline re-established green on main@4468e3a: 152 suites.
+- LANDED (12 merges, Pareto NOW top-12 swept start to finish; each: diff read -> verify_pr.sh battery -> credit merge -> push -> ls-remote assert -> written PR reply):
+  #2345 (james-kkc, fixes #1615) n5_new peels Paren on new() type operand — 42b43b9.
+  #2237 (james-kkc, #2041) any/error/generic base names in value positions E1002 — 8c456d0.
+  #2235 (james-kkc, #2102) builtin-arg checks on array length expressions — 2a2f33b.
+  #2241 (james-kkc, #1803) complex/real/imag + complex64/128 in const decls — 456ebaa.
+  #2240 (james-kkc, #1810) nil and complex array lengths rejected E6004 — 72dcd89 (push 500 x2, retry ok).
+  #2242 (james-kkc, #1917) newline/blank-ticket injection in managed blocks — d7e6588.
+  #2342 (james-kkc, fixes #1554) compound const range bounds via initializer — 1b0e0bc (push 500, retry ok).
+  #2344 (james-kkc, fixes #1616) Go literals/comments ignored in used_binding_roots — f764295 (push 500, retry ok).
+  #2243 (james-kkc, #1915) fixed-width const propagation through nested exprs — b2ac87d. Merge message named the wrong test file (nested_const_overflow_1915 is the real one); corrected in the PR reply.
+  #2234 (james-kkc, fixes #1976) pointer-to-scalar conversion conflicts E1002 — 75357f1.
+  #2236 (james-kkc, #1979) struct/pointer .pop() without pop method E1002 — 2b0c899. PROCEDURE FAULT self-caught: merged before the battery ran (diff was read, battery was not). Battery ran immediately on the merged tree: 162 suites + corpus + differential FULL green; slip and outcome disclosed on the PR thread. Lesson: no merge until verify_pr.sh prints ALL-GREEN — reading the diff is not the battery.
+  #1812 (9xj89gzrtw-hue, fixes #1804) directional make chan targets E2005 — 9bc9de8.
+- CI: 40 more action_required runs approved (287 -> 247 pending).
+- Suite growth this tick: 152 -> 163, all green; differential FULL agreement on every landing; final main 9bc9de8 (ls-remote == HEAD).
+- GitHub side-note: transient "Internal Server Error" on pushes (3 of 12 hit it); retry-after-40s pattern added to the landing loop.
