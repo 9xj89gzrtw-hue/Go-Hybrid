@@ -2789,6 +2789,12 @@ impl<'a> Collector<'a> {
 
     /// Family B1/B2 (#425): unary `!` requires `bool`, unary `-` requires a numeric operand.
     fn check_unary_operand(&mut self, op: UnOp, operand: &Expr, span: Span) {
+        // #1850: a unary operand is a single-value position. A void call or a
+        // multi-value call here passed the checker and emitted
+        // `!two_bools()` / `-two_ints()`, which Go rejects with
+        // "multiple-value ... in single-value context" / "(no value) used as
+        // value". Same check a binary operand already runs.
+        self.check_single_value_position(operand, "a unary operand", /*binding_position=*/ false);
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
