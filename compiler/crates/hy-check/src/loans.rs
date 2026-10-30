@@ -228,6 +228,43 @@ impl<'a> Checker<'a> {
                     self.check_a3_method_call(st, cr, idx, &root, &recv, &method);
                     return;
                 };
+                // #2200: a handle whose binding is vendored in `runtime/go/`
+                // has a FINITE method surface, and Go rejects every other name
+                // at `go build` (`doc.Get undefined (type jsonbinding.Value has
+                // no field or method Get)`). Fail closed here rather than let
+                // an unbuildable program pass `hyb check`. Types outside the
+                // modelled surface keep the old fail-open behaviour.
+                if let Some(surface) = foreign::foreign_method_surface(&tname) {
+                    if !surface.contains(&method.as_str()) {
+                        let list = surface.join(", ");
+                        self.diags.push(
+                            Diagnostic::error(
+                                "HYB-E1002",
+                                self.path.clone(),
+                                cr.span,
+                                format!(
+                                    "`{}` has no method `{}` — Go refuses `{} undefined (type {} has no field or method {})` (HYB-E1002)",
+                                    tname,
+                                    method,
+                                    cr.callee.render(),
+                                    tname,
+                                    method
+                                ),
+                            )
+                            .with_notes(vec![
+                                format!("`{}` is a foreign handle; its methods are `{}`", tname, list),
+                                format!(
+                                    "package-level names are not methods — write `{}.{}` instead of `{}.{}()`",
+                                    tname.split('.').next().unwrap_or(&tname),
+                                    method,
+                                    root,
+                                    method
+                                ),
+                            ]),
+                        );
+                        return;
+                    }
+                }
                 let receiver_moved = self
                     .lookup_binding(st, &root)
                     .map(|b| b.moved.is_some())
