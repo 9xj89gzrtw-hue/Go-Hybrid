@@ -313,6 +313,20 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Project the resolved TypeExpr of an expression the `ty_of_expr` cache
+    /// does not cover — composite channel/slice operands, nested receives,
+    /// `append(...)` results (see `recv_chan_type_expr` for the arm list).
+    /// Reused as the define-binding `ty` fallback in `process_local` so a
+    /// local bound from a composite (`sub := append(chs, ch)`) carries a
+    /// projected type; before this, such a binding had `ty: None`, nothing
+    /// to project at a later `<-sub[0]` in a type position (where the
+    /// E3008 direction walk does not run), and the send-only misuse passed
+    /// with 0 diagnostics — the "known remaining sibling" NOTE in
+    /// `tests/checker-corpus` / `recv_composite_channel_operands.rs`.
+    pub(crate) fn composite_type_expr(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
+        self.recv_chan_type_expr(st, expr)
+    }
+
     fn recv_chan_type_expr(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
         use hy_syntax::TypeExpr;
         if let Some(ty) = self.ty_of_expr(st, expr) {

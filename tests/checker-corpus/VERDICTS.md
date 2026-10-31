@@ -1074,4 +1074,5 @@ With this registration the corpus is **126 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
 by the autonomous pipeline (bundles author-758 / author-827, landings
 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
-companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
+companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.| local-composite-chan-recv-accept | ACCEPT | — | — | a local bound from a composite of bidirectional channels (`sub := append(chs, ch)`) carries the composite-projected type, so a later `<-sub[0]` receive stays legal end to end — checker accept, emitted Go builds, run exits 0 (rows added in-merge; the PR missed the README's own VERDICTS.md contract) |
+| local-composite-chan-recv-reject-e2008 | REJECT | BUILDABLE | `HYB-E2008` | same shape, send-only channels: `sub` previously carried no `ty`, so `<-sub[0]` in a type position passed with 0 diagnostics; the composite_type_expr fallback in process_local projects `chan<- int` through the Index arm and the direction check fires (rows added in-merge) |
