@@ -195,6 +195,7 @@
     },
     {
       "code": "HYB-E2008",
+      "tier0_rule_id": "BUILDABLE",
       "name": "receive-non-channel",
       "category": "type",
       "severity": "error",

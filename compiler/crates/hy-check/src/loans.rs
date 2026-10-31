@@ -1719,7 +1719,14 @@ impl<'a> Checker<'a> {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                     (_, inferred) => (
                         inferred,
-                        l.ty.clone().or_else(|| self.ty_of_expr(&pre_st, value)),
+                        l.ty.clone()
+                            .or_else(|| self.ty_of_expr(&pre_st, value))
+                            // Composite operands the type cache does not
+                            // project (`sub := append(chs, ch)`): bind the
+                            // projected type so later `<-sub[0]` receives
+                            // resolve their direction (the "known remaining
+                            // sibling" in recv_composite_channel_operands.rs).
+                            .or_else(|| self.composite_type_expr(&pre_st, value)),
                     ),
                 };
                 let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
