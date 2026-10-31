@@ -219,6 +219,20 @@ fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
+/// Non-nilable types in Go and Hybrid cannot be compared to untyped nil (SPEC §3.1 N1).
+/// Nilable types: pointer, interface, slice, map, channel, function.
+fn is_non_nilable(k: &OpKind) -> bool {
+    matches!(
+        k,
+        OpKind::Int
+            | OpKind::Float
+            | OpKind::Bool
+            | OpKind::Str
+            | OpKind::Struct(_)
+            | OpKind::Array(_)
+    )
+}
+
 /// Does a type conversion `target(arg)` fail because the two types are incompatible in Go?
 ///
 /// In Go, type conversions `T(x)` require compatible types:
@@ -3018,23 +3032,57 @@ impl<'a> Collector<'a> {
         match op {
             // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
             // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
-            // are rejected here under HYB-E1002 (rule `BUILDABLE`).
+            // and comparisons between non-nilable types and nil are rejected
+            // here under HYB-E1002 (rule `BUILDABLE` / SPEC §3.1 N1).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
-                if !Checker::is_nil_literal(lhs)
-                    && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
-                {
+                let lhs_is_nil = Checker::is_nil_literal(lhs);
+                let rhs_is_nil = Checker::is_nil_literal(rhs);
+                if lhs_is_nil && rhs_is_nil {
                     self.emit_e1002(
                         span,
                         format!(
-                            "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
+                            "invalid operation `{}`: operator `{}` not defined on untyped nil (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str
+                        ),
+                        "untyped nil cannot be compared with untyped nil",
+                    );
+                } else if !lhs_is_nil && !rhs_is_nil {
+                    if equality_kinds_conflict(&lk, &rk) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
+                                span_expr_label(lhs, op_str, rhs),
+                                op_str,
+                                lk.label(),
+                                rk.label()
+                            ),
+                            "equality operators (`==`, `!=`) require operands of matching type",
+                        );
+                    }
+                } else if lhs_is_nil && is_non_nilable(&rk) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` not defined between untyped nil and `{}` (HYB-E1002)",
                             span_expr_label(lhs, op_str, rhs),
                             op_str,
-                            lk.label(),
                             rk.label()
                         ),
-                        "equality operators (`==`, `!=`) require operands of matching type",
+                        "operator `==` and `!=` cannot compare untyped nil to non-nilable types (SPEC §3.1 N1)",
+                    );
+                } else if rhs_is_nil && is_non_nilable(&lk) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` not defined between `{}` and untyped nil (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label()
+                        ),
+                        "operator `==` and `!=` cannot compare untyped nil to non-nilable types (SPEC §3.1 N1)",
                     );
                 }
             }
