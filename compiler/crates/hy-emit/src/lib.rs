@@ -417,6 +417,20 @@ pub(crate) fn to_go_name(name: &str) -> String {
 /// The base NAMED type of a TypeExpr, if any (`*atomic.int64` →
 /// "atomic.int64", `env` → "env", `map[string]int` → None). Batch I's
 /// receiver tables key on this.
+/// (Go value-result count, ends in `error`) for a declared result list: a
+/// trailing `error` is the error slot, not a value (#726).
+pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
+    let err = matches!(
+        results.last(),
+        Some(FnResult {
+            ty: TypeExpr::Named { name, .. },
+            ..
+        }) if name == "error"
+    );
+    let n = if err { results.len() - 1 } else { results.len() };
+    (n, err)
+}
+
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
         TypeExpr::Named { name, .. } => Some(name.clone()),
@@ -594,6 +608,9 @@ pub struct Emitter {
     /// normalizes like any rust-call — and the pointer-param auto-address
     /// at call sites (09: `scale_then_register(e, …)` with `e *env`).
     fn_shapes: BTreeMap<String, FnShape>,
+    /// Result shapes of closures bound by name in the current fn
+    /// (`f := fn() error { … }`), so `f()?` knows its Go result count.
+    closure_shapes: BTreeMap<String, (usize, bool)>,
     /// User-struct field types (Batch I): struct → (field, declared hy type
     /// name — dotted for shape-known fields, "" otherwise). Receiver typing
     /// for `stats.mu.lock()` (18).
@@ -651,6 +668,7 @@ impl Emitter {
             export_pub: false,
             cur_fn_error_returns: None,
             fn_shapes: BTreeMap::new(),
+            closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
@@ -1275,6 +1293,7 @@ impl Emitter {
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
         self.var_struct.clear();
+        self.closure_shapes.clear();
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
