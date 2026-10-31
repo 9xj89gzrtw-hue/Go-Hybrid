@@ -27,3 +27,4 @@ fn run(path string) error {
     assert!(go.contains("defer f.Close()"), "{go}");
     assert!(go.contains("defer f.Seek("), "{go}");
 }
+// Row 13 BUILDABLE regression test (#2384)
