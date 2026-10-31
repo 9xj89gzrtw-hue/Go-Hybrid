@@ -239,9 +239,10 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn classify_value(&self, st: &FnState, expr: &Expr) -> Outcome {
+        let expr = unwrap_parens(expr);
         // `move x` — class 3; validate that `x` resolves to a movable shape
         // (never Unknown, Closure, BorrowHandle, or ForeignOpaque).
-        if let Expr::Move { operand, .. } = unwrap_parens(expr) {
+        if let Expr::Move { operand, .. } = expr {
             if let Expr::Ident { name, .. } = unwrap_parens(operand) {
                 return self.classify_move_ident(st, name);
             }
